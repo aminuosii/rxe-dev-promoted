@@ -63,6 +63,7 @@ void print_rxe_dma_info(const struct rxe_dma_info *dma) {
 }  
 
 void print_rxe_pkt_info(const struct rxe_pkt_info *pkt) {  
+    printf("pkt addr: %p\n", (void*)&pkt); 
     printf("qp addr: %p\n", (void*)&pkt->qp); 
     printf("wqe addr: %p\n", (void*)&pkt->wqe);  
     printf("mask: %s\n", rxe_wr_mask_to_str(wqe->mask)); 

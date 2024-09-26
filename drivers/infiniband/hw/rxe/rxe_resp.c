@@ -36,6 +36,7 @@
 #include "rxe.h"
 #include "rxe_loc.h"
 #include "rxe_queue.h"
+#include "rxe_debug.h"
 
 enum resp_states {
 	RESPST_NONE,
@@ -995,12 +996,22 @@ static enum resp_states acknowledge(struct rxe_qp *qp,
 	if (qp_type(qp) != IB_QPT_RC)
 		return RESPST_CLEANUP;
 
-	if (qp->resp.aeth_syndrome != AETH_ACK_UNLIMITED)
+	if (qp->resp.aeth_syndrome != AETH_ACK_UNLIMITED) {
+		printf("send ack 1 pkt addr : %p\n", (void*)&pkt)
 		send_ack(qp, pkt, qp->resp.aeth_syndrome, pkt->psn);
-	else if (pkt->mask & RXE_ATOMIC_MASK)
+	}
+		
+	else if (pkt->mask & RXE_ATOMIC_MASK) {
+		printf("send ack 2 pkt addr : %p\n", (void*)&pkt)
 		send_atomic_ack(qp, pkt, AETH_ACK_UNLIMITED);
+	}
+		
 	else if (bth_ack(pkt))
+	{
+		printf("send ack 3 pkt addr : %p\n", (void*)&pkt)
 		send_ack(qp, pkt, AETH_ACK_UNLIMITED, pkt->psn);
+	}
+		
 
 	return RESPST_CLEANUP;
 }
@@ -1206,11 +1217,15 @@ int rxe_responder(void *arg)
 		break;
 	}
 
+	printf("rxe_responder");
+
 	while (1) {
 		pr_debug("state = %s\n", resp_state_name[state]);
 		switch (state) {
 		case RESPST_GET_REQ:
 			state = get_req(qp, &pkt);
+			printf("pkt after get_req");
+			print_rxe_pkt_info(pkt);
 			break;
 		case RESPST_CHK_PSN:
 			state = check_psn(qp, pkt);

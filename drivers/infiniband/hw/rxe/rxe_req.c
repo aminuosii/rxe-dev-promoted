@@ -36,6 +36,7 @@
 #include "rxe.h"
 #include "rxe_loc.h"
 #include "rxe_queue.h"
+#include "rxe_debug.h"
 
 static int next_opcode(struct rxe_qp *qp, struct rxe_send_wqe *wqe,
 		       unsigned opcode);
@@ -591,7 +592,25 @@ next_wqe:
 		qp->req.need_retry = 0;
 	}
 
+	/*
+	struct rxe_send_wqe {
+		struct rxe_send_wr	wr;
+		struct rxe_av		av;
+		__u32			status;
+		__u32			state;
+		__u64			iova;
+		__u32			mask;
+		__u32			first_psn;
+		__u32			last_psn;
+		__u32			ack_length;
+		__u32			ssn;
+		__u32			has_rd_atomic;
+		struct rxe_dma_info	dma;
+	};
+	*/
 	wqe = req_next_wqe(qp);
+	printf("requester qp addr: %p\n", (void*)&qp);
+	print_rxe_send_wqe(wqe);
 	if (unlikely(!wqe))
 		goto exit;
 

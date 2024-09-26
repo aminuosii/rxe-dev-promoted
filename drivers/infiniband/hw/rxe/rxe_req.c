@@ -696,18 +696,26 @@ next_wqe:
 		payload = mtu;
 	}
 
+	printf("pkt before init_req_packet");
+	print_rxe_pkt_info(pkt);
 	skb = init_req_packet(qp, wqe, opcode, payload, &pkt);
 	if (unlikely(!skb)) {
 		pr_err("Failed allocating skb\n");
 		goto err;
 	}
 
+	printf("pkt before fill_packet");
+	print_rxe_pkt_info(pkt);
 	if (fill_packet(qp, wqe, &pkt, skb, payload)) {
 		pr_debug("Error during fill packet\n");
 		goto err;
 	}
 
+	printf("pkt before update_wqe_state");
+	print_rxe_pkt_info(pkt);
 	update_wqe_state(qp, wqe, &pkt, &prev_state);
+	printf("pkt after update_wqe_state");
+	print_rxe_pkt_info(pkt);
 	ret = rxe_xmit_packet(to_rdev(qp->ibqp.device), qp, &pkt, skb);
 	if (ret) {
 		qp->need_req_skb = 1;

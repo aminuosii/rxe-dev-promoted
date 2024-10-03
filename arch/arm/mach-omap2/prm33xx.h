@@ -118,7 +118,7 @@
 #define AM33XX_PM_CEFUSE_PWRSTST		AM33XX_PRM_REGADDR(AM33XX_PRM_CEFUSE_MOD, 0x0004)
 
 #ifndef __ASSEMBLER__
-int am33xx_prm_init(const struct omap_prcm_init_data *data);
+int am33xx_prm_init(void);
 
 #endif /* ASSEMBLER */
 #endif

@@ -19,10 +19,6 @@ extern unsigned long min_low_pfn;
  * highest page
  */
 extern unsigned long max_pfn;
-/*
- * highest possible page
- */
-extern unsigned long long max_possible_pfn;
 
 #ifndef CONFIG_NO_BOOTMEM
 /*
@@ -83,34 +79,34 @@ extern void *__alloc_bootmem(unsigned long size,
 			     unsigned long goal);
 extern void *__alloc_bootmem_nopanic(unsigned long size,
 				     unsigned long align,
-				     unsigned long goal) __malloc;
+				     unsigned long goal);
 extern void *__alloc_bootmem_node(pg_data_t *pgdat,
 				  unsigned long size,
 				  unsigned long align,
-				  unsigned long goal) __malloc;
+				  unsigned long goal);
 void *__alloc_bootmem_node_high(pg_data_t *pgdat,
 				  unsigned long size,
 				  unsigned long align,
-				  unsigned long goal) __malloc;
+				  unsigned long goal);
 extern void *__alloc_bootmem_node_nopanic(pg_data_t *pgdat,
 				  unsigned long size,
 				  unsigned long align,
-				  unsigned long goal) __malloc;
+				  unsigned long goal);
 void *___alloc_bootmem_node_nopanic(pg_data_t *pgdat,
 				  unsigned long size,
 				  unsigned long align,
 				  unsigned long goal,
-				  unsigned long limit) __malloc;
+				  unsigned long limit);
 extern void *__alloc_bootmem_low(unsigned long size,
 				 unsigned long align,
-				 unsigned long goal) __malloc;
+				 unsigned long goal);
 void *__alloc_bootmem_low_nopanic(unsigned long size,
 				 unsigned long align,
-				 unsigned long goal) __malloc;
+				 unsigned long goal);
 extern void *__alloc_bootmem_low_node(pg_data_t *pgdat,
 				      unsigned long size,
 				      unsigned long align,
-				      unsigned long goal) __malloc;
+				      unsigned long goal);
 
 #ifdef CONFIG_NO_BOOTMEM
 /* We are using top down, so it is safe to use 0 here */
@@ -361,12 +357,12 @@ extern void *alloc_large_system_hash(const char *tablename,
 /* Only NUMA needs hash distribution. 64bit NUMA architectures have
  * sufficient vmalloc space.
  */
-#ifdef CONFIG_NUMA
-#define HASHDIST_DEFAULT IS_ENABLED(CONFIG_64BIT)
-extern int hashdist;		/* Distribute hashes across NUMA nodes? */
+#if defined(CONFIG_NUMA) && defined(CONFIG_64BIT)
+#define HASHDIST_DEFAULT 1
 #else
-#define hashdist (0)
+#define HASHDIST_DEFAULT 0
 #endif
+extern int hashdist;		/* Distribute hashes across NUMA nodes? */
 
 
 #endif /* _LINUX_BOOTMEM_H */

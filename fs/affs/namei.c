@@ -251,7 +251,7 @@ int
 affs_unlink(struct inode *dir, struct dentry *dentry)
 {
 	pr_debug("%s(dir=%lu, %lu \"%pd\")\n", __func__, dir->i_ino,
-		 d_inode(dentry)->i_ino, dentry);
+		 dentry->d_inode->i_ino, dentry);
 
 	return affs_remove_header(dentry);
 }
@@ -320,7 +320,7 @@ int
 affs_rmdir(struct inode *dir, struct dentry *dentry)
 {
 	pr_debug("%s(dir=%lu, %lu \"%pd\")\n", __func__, dir->i_ino,
-		 d_inode(dentry)->i_ino, dentry);
+		 dentry->d_inode->i_ino, dentry);
 
 	return affs_remove_header(dentry);
 }
@@ -344,7 +344,6 @@ affs_symlink(struct inode *dir, struct dentry *dentry, const char *symname)
 		return -ENOSPC;
 
 	inode->i_op = &affs_symlink_inode_operations;
-	inode_nohighmem(inode);
 	inode->i_data.a_ops = &affs_symlink_aops;
 	inode->i_mode = S_IFLNK | 0777;
 	mode_to_prot(inode);
@@ -404,7 +403,7 @@ err:
 int
 affs_link(struct dentry *old_dentry, struct inode *dir, struct dentry *dentry)
 {
-	struct inode *inode = d_inode(old_dentry);
+	struct inode *inode = old_dentry->d_inode;
 
 	pr_debug("%s(%lu, %lu, \"%pd\")\n", __func__, inode->i_ino, dir->i_ino,
 		 dentry);
@@ -431,13 +430,13 @@ affs_rename(struct inode *old_dir, struct dentry *old_dentry,
 		return retval;
 
 	/* Unlink destination if it already exists */
-	if (d_really_is_positive(new_dentry)) {
+	if (new_dentry->d_inode) {
 		retval = affs_remove_header(new_dentry);
 		if (retval)
 			return retval;
 	}
 
-	bh = affs_bread(sb, d_inode(old_dentry)->i_ino);
+	bh = affs_bread(sb, old_dentry->d_inode->i_ino);
 	if (!bh)
 		return -EIO;
 

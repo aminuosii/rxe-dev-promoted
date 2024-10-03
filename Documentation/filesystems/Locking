@@ -50,7 +50,8 @@ prototypes:
 	int (*rename2) (struct inode *, struct dentry *,
 			struct inode *, struct dentry *, unsigned int);
 	int (*readlink) (struct dentry *, char __user *,int);
-	const char *(*get_link) (struct dentry *, struct inode *, void **);
+	void * (*follow_link) (struct dentry *, struct nameidata *);
+	void (*put_link) (struct dentry *, struct nameidata *, void *);
 	void (*truncate) (struct inode *);
 	int (*permission) (struct inode *, int, unsigned int);
 	int (*get_acl)(struct inode *, int);
@@ -82,7 +83,8 @@ rmdir:		yes (both)	(see below)
 rename:		yes (all)	(see below)
 rename2:	yes (all)	(see below)
 readlink:	no
-get_link:	no
+follow_link:	no
+put_link:	no
 setattr:	yes
 permission:	no (may not block if called in rcu-walk mode)
 get_acl:	no
@@ -194,7 +196,7 @@ prototypes:
 	void (*invalidatepage) (struct page *, unsigned int, unsigned int);
 	int (*releasepage) (struct page *, int);
 	void (*freepage)(struct page *);
-	int (*direct_IO)(struct kiocb *, struct iov_iter *iter);
+	int (*direct_IO)(struct kiocb *, struct iov_iter *iter, loff_t offset);
 	int (*migratepage)(struct address_space *, struct page *, struct page *);
 	int (*launder_page)(struct page *);
 	int (*is_partially_uptodate)(struct page *, unsigned long, unsigned long);
@@ -395,8 +397,7 @@ prototypes:
 	int (*release) (struct gendisk *, fmode_t);
 	int (*ioctl) (struct block_device *, fmode_t, unsigned, unsigned long);
 	int (*compat_ioctl) (struct block_device *, fmode_t, unsigned, unsigned long);
-	int (*direct_access) (struct block_device *, sector_t, void __pmem **,
-				unsigned long *);
+	int (*direct_access) (struct block_device *, sector_t, void **, unsigned long *);
 	int (*media_changed) (struct gendisk *);
 	void (*unlock_native_capacity) (struct gendisk *);
 	int (*revalidate_disk) (struct gendisk *);

@@ -286,12 +286,12 @@ static int pxa168_eth_stop(struct net_device *dev);
 
 static inline u32 rdl(struct pxa168_eth_private *pep, int offset)
 {
-	return readl_relaxed(pep->base + offset);
+	return readl(pep->base + offset);
 }
 
 static inline void wrl(struct pxa168_eth_private *pep, int offset, u32 data)
 {
-	writel_relaxed(data, pep->base + offset);
+	writel(data, pep->base + offset);
 }
 
 static void abort_dma(struct pxa168_eth_private *pep)
@@ -342,9 +342,9 @@ static void rxq_refill(struct net_device *dev)
 		pep->rx_skb[used_rx_desc] = skb;
 
 		/* Return the descriptor to DMA ownership */
-		dma_wmb();
+		wmb();
 		p_used_rx_desc->cmd_sts = BUF_OWNED_BY_DMA | RX_EN_INT;
-		dma_wmb();
+		wmb();
 
 		/* Move the used descriptor pointer to the next descriptor */
 		pep->rx_used_desc_q = (used_rx_desc + 1) % pep->rx_ring_size;
@@ -794,7 +794,7 @@ static int rxq_process(struct net_device *dev, int budget)
 		rx_used_desc = pep->rx_used_desc_q;
 		rx_desc = &pep->p_rx_desc_area[rx_curr_desc];
 		cmd_sts = rx_desc->cmd_sts;
-		dma_rmb();
+		rmb();
 		if (cmd_sts & (BUF_OWNED_BY_DMA))
 			break;
 		skb = pep->rx_skb[rx_curr_desc];
@@ -979,8 +979,8 @@ static int pxa168_init_phy(struct net_device *dev)
 		return 0;
 
 	pep->phy = mdiobus_scan(pep->smi_bus, pep->phy_addr);
-	if (IS_ERR(pep->phy))
-		return PTR_ERR(pep->phy);
+	if (!pep->phy)
+		return -ENODEV;
 
 	err = phy_connect_direct(dev, pep->phy, pxa168_eth_adjust_link,
 				 pep->phy_intf);
@@ -1287,7 +1287,7 @@ static int pxa168_eth_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	skb_tx_timestamp(skb);
 
-	dma_wmb();
+	wmb();
 	desc->cmd_sts = BUF_OWNED_BY_DMA | TX_GEN_CRC | TX_FIRST_DESC |
 			TX_ZERO_PADDING | TX_LAST_DESC | TX_EN_INT;
 	wmb();
@@ -1295,7 +1295,7 @@ static int pxa168_eth_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	stats->tx_bytes += length;
 	stats->tx_packets++;
-	netif_trans_update(dev);
+	dev->trans_start = jiffies;
 	if (pep->tx_ring_size - pep->tx_desc_count <= 1) {
 		/* We handled the current skb, but now we are out of space.*/
 		netif_stop_queue(dev);
@@ -1508,8 +1508,7 @@ static int pxa168_eth_probe(struct platform_device *pdev)
 		np = of_parse_phandle(pdev->dev.of_node, "phy-handle", 0);
 		if (!np) {
 			dev_err(&pdev->dev, "missing phy-handle\n");
-			err = -EINVAL;
-			goto err_netdev;
+			return -EINVAL;
 		}
 		of_property_read_u32(np, "reg", &pep->phy_addr);
 		pep->phy_intf = of_get_phy_mode(pdev->dev.of_node);
@@ -1527,7 +1526,7 @@ static int pxa168_eth_probe(struct platform_device *pdev)
 	pep->smi_bus = mdiobus_alloc();
 	if (pep->smi_bus == NULL) {
 		err = -ENOMEM;
-		goto err_netdev;
+		goto err_base;
 	}
 	pep->smi_bus->priv = pep;
 	pep->smi_bus->name = "pxa168_eth smi";
@@ -1552,10 +1551,13 @@ err_mdiobus:
 	mdiobus_unregister(pep->smi_bus);
 err_free_mdio:
 	mdiobus_free(pep->smi_bus);
+err_base:
+	iounmap(pep->base);
 err_netdev:
 	free_netdev(dev);
 err_clk:
-	clk_disable_unprepare(clk);
+	clk_disable(clk);
+	clk_put(clk);
 	return err;
 }
 
@@ -1572,9 +1574,13 @@ static int pxa168_eth_remove(struct platform_device *pdev)
 	if (pep->phy)
 		phy_disconnect(pep->phy);
 	if (pep->clk) {
-		clk_disable_unprepare(pep->clk);
+		clk_disable(pep->clk);
+		clk_put(pep->clk);
+		pep->clk = NULL;
 	}
 
+	iounmap(pep->base);
+	pep->base = NULL;
 	mdiobus_unregister(pep->smi_bus);
 	mdiobus_free(pep->smi_bus);
 	unregister_netdev(dev);

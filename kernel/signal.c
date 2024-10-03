@@ -224,7 +224,7 @@ static inline void print_dropped_signal(int sig)
 	if (!__ratelimit(&ratelimit_state))
 		return;
 
-	pr_info("%s/%d: reached RLIMIT_SIGPENDING, dropped signal %d\n",
+	printk(KERN_INFO "%s/%d: reached RLIMIT_SIGPENDING, dropped signal %d\n",
 				current->comm, current->pid, sig);
 }
 
@@ -245,7 +245,7 @@ static inline void print_dropped_signal(int sig)
  * RETURNS:
  * %true if @mask is set, %false if made noop because @task was dying.
  */
-bool task_set_jobctl_pending(struct task_struct *task, unsigned long mask)
+bool task_set_jobctl_pending(struct task_struct *task, unsigned int mask)
 {
 	BUG_ON(mask & ~(JOBCTL_PENDING_MASK | JOBCTL_STOP_CONSUME |
 			JOBCTL_STOP_SIGMASK | JOBCTL_TRAPPING));
@@ -297,7 +297,7 @@ void task_clear_jobctl_trapping(struct task_struct *task)
  * CONTEXT:
  * Must be called with @task->sighand->siglock held.
  */
-void task_clear_jobctl_pending(struct task_struct *task, unsigned long mask)
+void task_clear_jobctl_pending(struct task_struct *task, unsigned int mask)
 {
 	BUG_ON(mask & ~JOBCTL_PENDING_MASK);
 
@@ -414,16 +414,21 @@ void flush_sigqueue(struct sigpending *queue)
 }
 
 /*
- * Flush all pending signals for this kthread.
+ * Flush all pending signals for a task.
  */
+void __flush_signals(struct task_struct *t)
+{
+	clear_tsk_thread_flag(t, TIF_SIGPENDING);
+	flush_sigqueue(&t->pending);
+	flush_sigqueue(&t->signal->shared_pending);
+}
+
 void flush_signals(struct task_struct *t)
 {
 	unsigned long flags;
 
 	spin_lock_irqsave(&t->sighand->siglock, flags);
-	clear_tsk_thread_flag(t, TIF_SIGPENDING);
-	flush_sigqueue(&t->pending);
-	flush_sigqueue(&t->signal->shared_pending);
+	__flush_signals(t);
 	spin_unlock_irqrestore(&t->sighand->siglock, flags);
 }
 
@@ -503,6 +508,41 @@ int unhandled_signal(struct task_struct *tsk, int sig)
 	return !tsk->ptrace;
 }
 
+/*
+ * Notify the system that a driver wants to block all signals for this
+ * process, and wants to be notified if any signals at all were to be
+ * sent/acted upon.  If the notifier routine returns non-zero, then the
+ * signal will be acted upon after all.  If the notifier routine returns 0,
+ * then then signal will be blocked.  Only one block per process is
+ * allowed.  priv is a pointer to private data that the notifier routine
+ * can use to determine if the signal should be blocked or not.
+ */
+void
+block_all_signals(int (*notifier)(void *priv), void *priv, sigset_t *mask)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&current->sighand->siglock, flags);
+	current->notifier_mask = mask;
+	current->notifier_data = priv;
+	current->notifier = notifier;
+	spin_unlock_irqrestore(&current->sighand->siglock, flags);
+}
+
+/* Notify the system that blocking has ended. */
+
+void
+unblock_all_signals(void)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&current->sighand->siglock, flags);
+	current->notifier = NULL;
+	current->notifier_data = NULL;
+	recalc_sigpending();
+	spin_unlock_irqrestore(&current->sighand->siglock, flags);
+}
+
 static void collect_signal(int sig, struct sigpending *list, siginfo_t *info)
 {
 	struct sigqueue *q, *first = NULL;
@@ -545,8 +585,19 @@ static int __dequeue_signal(struct sigpending *pending, sigset_t *mask,
 {
 	int sig = next_signal(pending, mask);
 
-	if (sig)
+	if (sig) {
+		if (current->notifier) {
+			if (sigismember(current->notifier_mask, sig)) {
+				if (!(current->notifier)(current->notifier_data)) {
+					clear_thread_flag(TIF_SIGPENDING);
+					return 0;
+				}
+			}
+		}
+
 		collect_signal(sig, pending, info);
+	}
+
 	return sig;
 }
 
@@ -788,7 +839,7 @@ static bool prepare_signal(int sig, struct task_struct *p, bool force)
 	sigset_t flush;
 
 	if (signal->flags & (SIGNAL_GROUP_EXIT | SIGNAL_GROUP_COREDUMP)) {
-		if (!(signal->flags & SIGNAL_GROUP_EXIT))
+		if (signal->flags & SIGNAL_GROUP_COREDUMP)
 			return sig == SIGKILL;
 		/*
 		 * The process is in the middle of dying, nothing to do.
@@ -1089,10 +1140,10 @@ static int send_signal(int sig, struct siginfo *info, struct task_struct *t,
 static void print_fatal_signal(int signr)
 {
 	struct pt_regs *regs = signal_pt_regs();
-	pr_info("potentially unexpected fatal signal %d.\n", signr);
+	printk(KERN_INFO "potentially unexpected fatal signal %d.\n", signr);
 
 #if defined(__i386__) && !defined(__arch_um__)
-	pr_info("code at %08lx: ", regs->ip);
+	printk(KERN_INFO "code at %08lx: ", regs->ip);
 	{
 		int i;
 		for (i = 0; i < 16; i++) {
@@ -1100,10 +1151,10 @@ static void print_fatal_signal(int signr)
 
 			if (get_user(insn, (unsigned char *)(regs->ip + i)))
 				break;
-			pr_cont("%02x ", insn);
+			printk(KERN_CONT "%02x ", insn);
 		}
 	}
-	pr_cont("\n");
+	printk(KERN_CONT "\n");
 #endif
 	preempt_disable();
 	show_regs(regs);
@@ -1949,7 +2000,7 @@ static bool do_signal_stop(int signr)
 	struct signal_struct *sig = current->signal;
 
 	if (!(current->jobctl & JOBCTL_STOP_PENDING)) {
-		unsigned long gstop = JOBCTL_STOP_PENDING | JOBCTL_STOP_CONSUME;
+		unsigned int gstop = JOBCTL_STOP_PENDING | JOBCTL_STOP_CONSUME;
 		struct task_struct *t;
 
 		/* signr will be recorded in task->jobctl for retries */
@@ -2437,6 +2488,9 @@ EXPORT_SYMBOL(force_sig);
 EXPORT_SYMBOL(send_sig);
 EXPORT_SYMBOL(send_sig_info);
 EXPORT_SYMBOL(sigprocmask);
+EXPORT_SYMBOL(block_all_signals);
+EXPORT_SYMBOL(unblock_all_signals);
+
 
 /*
  * System call entry points.
@@ -2699,19 +2753,12 @@ int copy_siginfo_to_user(siginfo_t __user *to, const siginfo_t *from)
 		 * Other callers might not initialize the si_lsb field,
 		 * so check explicitly for the right codes here.
 		 */
-		if (from->si_signo == SIGBUS &&
-		    (from->si_code == BUS_MCEERR_AR || from->si_code == BUS_MCEERR_AO))
+		if (from->si_code == BUS_MCEERR_AR || from->si_code == BUS_MCEERR_AO)
 			err |= __put_user(from->si_addr_lsb, &to->si_addr_lsb);
 #endif
 #ifdef SEGV_BNDERR
-		if (from->si_signo == SIGSEGV && from->si_code == SEGV_BNDERR) {
-			err |= __put_user(from->si_lower, &to->si_lower);
-			err |= __put_user(from->si_upper, &to->si_upper);
-		}
-#endif
-#ifdef SEGV_PKUERR
-		if (from->si_signo == SIGSEGV && from->si_code == SEGV_PKUERR)
-			err |= __put_user(from->si_pkey, &to->si_pkey);
+		err |= __put_user(from->si_lower, &to->si_lower);
+		err |= __put_user(from->si_upper, &to->si_upper);
 #endif
 		break;
 	case __SI_CHLD:
@@ -2975,7 +3022,7 @@ COMPAT_SYSCALL_DEFINE3(rt_sigqueueinfo,
 			int, sig,
 			struct compat_siginfo __user *, uinfo)
 {
-	siginfo_t info = {};
+	siginfo_t info;
 	int ret = copy_siginfo_from_user32(&info, uinfo);
 	if (unlikely(ret))
 		return ret;
@@ -3019,7 +3066,7 @@ COMPAT_SYSCALL_DEFINE4(rt_tgsigqueueinfo,
 			int, sig,
 			struct compat_siginfo __user *, uinfo)
 {
-	siginfo_t info = {};
+	siginfo_t info;
 
 	if (copy_siginfo_from_user32(&info, uinfo))
 		return -EFAULT;
@@ -3099,14 +3146,12 @@ do_sigaltstack (const stack_t __user *uss, stack_t __user *uoss, unsigned long s
 
 	oss.ss_sp = (void __user *) current->sas_ss_sp;
 	oss.ss_size = current->sas_ss_size;
-	oss.ss_flags = sas_ss_flags(sp) |
-		(current->sas_ss_flags & SS_FLAG_BITS);
+	oss.ss_flags = sas_ss_flags(sp);
 
 	if (uss) {
 		void __user *ss_sp;
 		size_t ss_size;
-		unsigned ss_flags;
-		int ss_mode;
+		int ss_flags;
 
 		error = -EFAULT;
 		if (!access_ok(VERIFY_READ, uss, sizeof(*uss)))
@@ -3121,13 +3166,18 @@ do_sigaltstack (const stack_t __user *uss, stack_t __user *uoss, unsigned long s
 		if (on_sig_stack(sp))
 			goto out;
 
-		ss_mode = ss_flags & ~SS_FLAG_BITS;
 		error = -EINVAL;
-		if (ss_mode != SS_DISABLE && ss_mode != SS_ONSTACK &&
-				ss_mode != 0)
+		/*
+		 * Note - this code used to test ss_flags incorrectly:
+		 *  	  old code may have been written using ss_flags==0
+		 *	  to mean ss_flags==SS_ONSTACK (as this was the only
+		 *	  way that worked) - this fix preserves that older
+		 *	  mechanism.
+		 */
+		if (ss_flags != SS_DISABLE && ss_flags != SS_ONSTACK && ss_flags != 0)
 			goto out;
 
-		if (ss_mode == SS_DISABLE) {
+		if (ss_flags == SS_DISABLE) {
 			ss_size = 0;
 			ss_sp = NULL;
 		} else {
@@ -3138,7 +3188,6 @@ do_sigaltstack (const stack_t __user *uss, stack_t __user *uoss, unsigned long s
 
 		current->sas_ss_sp = (unsigned long) ss_sp;
 		current->sas_ss_size = ss_size;
-		current->sas_ss_flags = ss_flags;
 	}
 
 	error = 0;
@@ -3169,14 +3218,9 @@ int restore_altstack(const stack_t __user *uss)
 int __save_altstack(stack_t __user *uss, unsigned long sp)
 {
 	struct task_struct *t = current;
-	int err = __put_user((void __user *)t->sas_ss_sp, &uss->ss_sp) |
-		__put_user(t->sas_ss_flags, &uss->ss_flags) |
+	return  __put_user((void __user *)t->sas_ss_sp, &uss->ss_sp) |
+		__put_user(sas_ss_flags(sp), &uss->ss_flags) |
 		__put_user(t->sas_ss_size, &uss->ss_size);
-	if (err)
-		return err;
-	if (t->sas_ss_flags & SS_AUTODISARM)
-		sas_ss_reset(t);
-	return 0;
 }
 
 #ifdef CONFIG_COMPAT
@@ -3510,15 +3554,13 @@ SYSCALL_DEFINE0(pause)
 
 #endif
 
-static int sigsuspend(sigset_t *set)
+int sigsuspend(sigset_t *set)
 {
 	current->saved_sigmask = current->blocked;
 	set_current_blocked(set);
 
-	while (!signal_pending(current)) {
-		__set_current_state(TASK_INTERRUPTIBLE);
-		schedule();
-	}
+	__set_current_state(TASK_INTERRUPTIBLE);
+	schedule();
 	set_restore_sigmask();
 	return -ERESTARTNOHAND;
 }
@@ -3588,10 +3630,6 @@ __weak const char *arch_vma_name(struct vm_area_struct *vma)
 
 void __init signals_init(void)
 {
-	/* If this check fails, the __ARCH_SI_PREAMBLE_SIZE value is wrong! */
-	BUILD_BUG_ON(__ARCH_SI_PREAMBLE_SIZE
-		!= offsetof(struct siginfo, _sifields._pad));
-
 	sigqueue_cachep = KMEM_CACHE(sigqueue, SLAB_PANIC);
 }
 

@@ -9,9 +9,8 @@
  * we put the segment information here.
  */
 typedef struct {
-#ifdef CONFIG_MODIFY_LDT_SYSCALL
-	struct ldt_struct *ldt;
-#endif
+	void *ldt;
+	int size;
 
 #ifdef CONFIG_X86_64
 	/* True if mm supports a task running in 32 bit compatibility mode. */
@@ -19,8 +18,7 @@ typedef struct {
 #endif
 
 	struct mutex lock;
-	void __user *vdso;			/* vdso base address */
-	const struct vdso_image *vdso_image;	/* vdso image in use */
+	void __user *vdso;
 
 	atomic_t perf_rdpmc_allowed;	/* nonzero if rdpmc is allowed */
 } mm_context_t;

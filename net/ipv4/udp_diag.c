@@ -36,16 +36,15 @@ static int udp_dump_one(struct udp_table *tbl, struct sk_buff *in_skb,
 			const struct inet_diag_req_v2 *req)
 {
 	int err = -EINVAL;
-	struct sock *sk = NULL;
+	struct sock *sk;
 	struct sk_buff *rep;
 	struct net *net = sock_net(in_skb->sk);
 
-	rcu_read_lock();
 	if (req->sdiag_family == AF_INET)
 		sk = __udp4_lib_lookup(net,
 				req->id.idiag_src[0], req->id.idiag_sport,
 				req->id.idiag_dst[0], req->id.idiag_dport,
-				req->id.idiag_if, tbl, NULL);
+				req->id.idiag_if, tbl);
 #if IS_ENABLED(CONFIG_IPV6)
 	else if (req->sdiag_family == AF_INET6)
 		sk = __udp6_lib_lookup(net,
@@ -53,11 +52,11 @@ static int udp_dump_one(struct udp_table *tbl, struct sk_buff *in_skb,
 				req->id.idiag_sport,
 				(struct in6_addr *)req->id.idiag_dst,
 				req->id.idiag_dport,
-				req->id.idiag_if, tbl, NULL);
+				req->id.idiag_if, tbl);
 #endif
-	if (sk && !atomic_inc_not_zero(&sk->sk_refcnt))
-		sk = NULL;
-	rcu_read_unlock();
+	else
+		goto out_nosk;
+
 	err = -ENOENT;
 	if (!sk)
 		goto out_nosk;
@@ -97,23 +96,24 @@ static void udp_dump(struct udp_table *table, struct sk_buff *skb,
 		     struct netlink_callback *cb,
 		     const struct inet_diag_req_v2 *r, struct nlattr *bc)
 {
-	struct net *net = sock_net(skb->sk);
 	int num, s_num, slot, s_slot;
+	struct net *net = sock_net(skb->sk);
 
 	s_slot = cb->args[0];
 	num = s_num = cb->args[1];
 
 	for (slot = s_slot; slot <= table->mask; s_num = 0, slot++) {
-		struct udp_hslot *hslot = &table->hash[slot];
 		struct sock *sk;
+		struct hlist_nulls_node *node;
+		struct udp_hslot *hslot = &table->hash[slot];
 
 		num = 0;
 
-		if (hlist_empty(&hslot->head))
+		if (hlist_nulls_empty(&hslot->head))
 			continue;
 
 		spin_lock_bh(&hslot->lock);
-		sk_for_each(sk, &hslot->head) {
+		sk_nulls_for_each(sk, node, &hslot->head) {
 			struct inet_sock *inet = inet_sk(sk);
 
 			if (!net_eq(sock_net(sk), net))
@@ -170,7 +170,6 @@ static const struct inet_diag_handler udp_diag_handler = {
 	.dump_one	 = udp_diag_dump_one,
 	.idiag_get_info  = udp_diag_get_info,
 	.idiag_type	 = IPPROTO_UDP,
-	.idiag_info_size = 0,
 };
 
 static void udplite_diag_dump(struct sk_buff *skb, struct netlink_callback *cb,
@@ -191,7 +190,6 @@ static const struct inet_diag_handler udplite_diag_handler = {
 	.dump_one	 = udplite_diag_dump_one,
 	.idiag_get_info  = udp_diag_get_info,
 	.idiag_type	 = IPPROTO_UDPLITE,
-	.idiag_info_size = 0,
 };
 
 static int __init udp_diag_init(void)

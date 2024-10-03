@@ -109,9 +109,7 @@ struct inode *ialloc(struct inode *parent, umode_t mode)
 	/*
 	 * Allocate inode to quota.
 	 */
-	rc = dquot_initialize(inode);
-	if (rc)
-		goto fail_drop;
+	dquot_initialize(inode);
 	rc = dquot_alloc_inode(inode);
 	if (rc)
 		goto fail_drop;
@@ -151,7 +149,7 @@ struct inode *ialloc(struct inode *parent, umode_t mode)
 	jfs_inode->xtlid = 0;
 	jfs_set_inode_flags(inode);
 
-	jfs_info("ialloc returns inode = 0x%p", inode);
+	jfs_info("ialloc returns inode = 0x%p\n", inode);
 
 	return inode;
 

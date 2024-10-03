@@ -44,6 +44,7 @@
 #include "../include/lustre_handles.h"
 #include "../include/lustre_lib.h"
 
+
 static __u64 handle_base;
 #define HANDLE_INCR 7
 static spinlock_t handle_base_lock;
@@ -65,7 +66,7 @@ void class_handle_hash(struct portals_handle *h,
 {
 	struct handle_bucket *bucket;
 
-	LASSERT(h);
+	LASSERT(h != NULL);
 	LASSERT(list_empty(&h->h_link));
 
 	/*
@@ -125,7 +126,6 @@ static void class_handle_unhash_nolock(struct portals_handle *h)
 void class_handle_unhash(struct portals_handle *h)
 {
 	struct handle_bucket *bucket;
-
 	bucket = handle_hash + (h->h_cookie & HANDLE_HASH_MASK);
 
 	spin_lock(&bucket->lock);
@@ -134,17 +134,29 @@ void class_handle_unhash(struct portals_handle *h)
 }
 EXPORT_SYMBOL(class_handle_unhash);
 
+void class_handle_hash_back(struct portals_handle *h)
+{
+	struct handle_bucket *bucket;
+
+	bucket = handle_hash + (h->h_cookie & HANDLE_HASH_MASK);
+
+	spin_lock(&bucket->lock);
+	list_add_rcu(&h->h_link, &bucket->head);
+	h->h_in = 1;
+	spin_unlock(&bucket->lock);
+}
+EXPORT_SYMBOL(class_handle_hash_back);
+
 void *class_handle2object(__u64 cookie)
 {
 	struct handle_bucket *bucket;
 	struct portals_handle *h;
 	void *retval = NULL;
 
-	LASSERT(handle_hash);
+	LASSERT(handle_hash != NULL);
 
 	/* Be careful when you want to change this code. See the
-	 * rcu_read_lock() definition on top this file. - jxiong
-	 */
+	 * rcu_read_lock() definition on top this file. - jxiong */
 	bucket = handle_hash + (cookie & HANDLE_HASH_MASK);
 
 	rcu_read_lock();
@@ -171,24 +183,23 @@ void class_handle_free_cb(struct rcu_head *rcu)
 	struct portals_handle *h = RCU2HANDLE(rcu);
 	void *ptr = (void *)(unsigned long)h->h_cookie;
 
-	if (h->h_ops->hop_free)
+	if (h->h_ops->hop_free != NULL)
 		h->h_ops->hop_free(ptr, h->h_size);
 	else
-		kfree(ptr);
+		OBD_FREE(ptr, h->h_size);
 }
 EXPORT_SYMBOL(class_handle_free_cb);
 
 int class_handle_init(void)
 {
 	struct handle_bucket *bucket;
-	struct timespec64 ts;
+	struct timeval tv;
 	int seed[2];
 
-	LASSERT(!handle_hash);
+	LASSERT(handle_hash == NULL);
 
-	handle_hash = libcfs_kvzalloc(sizeof(*bucket) * HANDLE_HASH_SIZE,
-				      GFP_NOFS);
-	if (!handle_hash)
+	OBD_ALLOC_LARGE(handle_hash, sizeof(*bucket) * HANDLE_HASH_SIZE);
+	if (handle_hash == NULL)
 		return -ENOMEM;
 
 	spin_lock_init(&handle_base_lock);
@@ -200,8 +211,8 @@ int class_handle_init(void)
 
 	/** bug 21430: add randomness to the initial base */
 	cfs_get_random_bytes(seed, sizeof(seed));
-	ktime_get_ts64(&ts);
-	cfs_srand(ts.tv_sec ^ seed[0], ts.tv_nsec ^ seed[1]);
+	do_gettimeofday(&tv);
+	cfs_srand(tv.tv_sec ^ seed[0], tv.tv_usec ^ seed[1]);
 
 	cfs_get_random_bytes(&handle_base, sizeof(handle_base));
 	LASSERT(handle_base != 0ULL);
@@ -234,12 +245,11 @@ static int cleanup_all_handles(void)
 void class_handle_cleanup(void)
 {
 	int count;
-
-	LASSERT(handle_hash);
+	LASSERT(handle_hash != NULL);
 
 	count = cleanup_all_handles();
 
-	kvfree(handle_hash);
+	OBD_FREE_LARGE(handle_hash, sizeof(*handle_hash) * HANDLE_HASH_SIZE);
 	handle_hash = NULL;
 
 	if (count != 0)

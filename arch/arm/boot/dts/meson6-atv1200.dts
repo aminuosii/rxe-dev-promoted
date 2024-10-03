@@ -64,7 +64,3 @@
 &uart_AO {
 	status = "okay";
 };
-
-&ethmac {
-	status = "okay";
-};

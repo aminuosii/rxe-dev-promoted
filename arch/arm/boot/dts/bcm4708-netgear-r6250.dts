@@ -10,18 +10,27 @@
 /dts-v1/;
 
 #include "bcm4708.dtsi"
-#include "bcm5301x-nand-cs0-bch8.dtsi"
 
 / {
 	compatible = "netgear,r6250v1", "brcm,bcm4708";
 	model = "Netgear R6250 V1 (BCM4708)";
 
 	chosen {
-		bootargs = "console=ttyS0,115200 earlycon";
+		bootargs = "console=ttyS0,115200";
 	};
 
 	memory {
 		reg = <0x00000000 0x08000000>;
+	};
+
+	chipcommonA {
+		uart0: serial@0300 {
+			status = "okay";
+		};
+
+		uart1: serial@0400 {
+			status = "okay";
+		};
 	};
 
 	leds {
@@ -36,13 +45,13 @@
 		power0 {
 			label = "bcm53xx:green:power";
 			gpios = <&chipcommon 2 GPIO_ACTIVE_LOW>;
-			linux,default-trigger = "default-on";
+			linux,default-trigger = "default-off";
 		};
 
 		power1 {
 			label = "bcm53xx:amber:power";
 			gpios = <&chipcommon 3 GPIO_ACTIVE_LOW>;
-			linux,default-trigger = "default-off";
+			linux,default-trigger = "default-on";
 		};
 
 		usb {
@@ -81,12 +90,4 @@
 			gpios = <&chipcommon 6 GPIO_ACTIVE_LOW>;
 		};
 	};
-};
-
-&uart0 {
-	status = "okay";
-};
-
-&usb3 {
-	vcc-gpio = <&chipcommon 0 GPIO_ACTIVE_HIGH>;
 };

@@ -1,6 +1,6 @@
 /*
- * Copyright (c) 2016 Mellanox Technologies Ltd. All rights reserved.
- * Copyright (c) 2015 System Fabric Works, Inc. All rights reserved.
+ * Copyright (c) 2009-2011 Mellanox Technologies Ltd. All rights reserved.
+ * Copyright (c) 2009-2011 System Fabric Works, Inc. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -31,10 +31,12 @@
  * SOFTWARE.
  */
 
+/* multicast implemtation details */
+
 #include "rxe.h"
 #include "rxe_loc.h"
 
-int rxe_mcast_get_grp(struct rxe_dev *rxe, union ib_gid *mgid,
+int rxe_mcast_get_grp(struct rxe_dev *rxe, union ib_gid *mgid, u16 mlid,
 		      struct rxe_mc_grp **grp_p)
 {
 	int err;
@@ -57,14 +59,14 @@ int rxe_mcast_get_grp(struct rxe_dev *rxe, union ib_gid *mgid,
 
 	INIT_LIST_HEAD(&grp->qp_list);
 	spin_lock_init(&grp->mcg_lock);
+	grp->mlid = mlid;
 	grp->rxe = rxe;
-
-	rxe_add_key(grp, mgid);
 
 	err = rxe->ifc_ops->mcast_add(rxe, mgid);
 	if (err)
 		goto err2;
 
+	rxe_add_key(grp, mgid);
 done:
 	*grp_p = grp;
 	return 0;
@@ -120,7 +122,7 @@ out:
 }
 
 int rxe_mcast_drop_grp_elem(struct rxe_dev *rxe, struct rxe_qp *qp,
-			    union ib_gid *mgid)
+			    union ib_gid *mgid, u16 mlid)
 {
 	struct rxe_mc_grp *grp;
 	struct rxe_mc_elem *elem, *tmp;

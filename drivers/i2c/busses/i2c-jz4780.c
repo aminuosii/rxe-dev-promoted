@@ -23,7 +23,6 @@
 #include <linux/i2c.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
-#include <linux/io.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
@@ -764,23 +763,15 @@ static int jz4780_i2c_probe(struct platform_device *pdev)
 	if (IS_ERR(i2c->clk))
 		return PTR_ERR(i2c->clk);
 
-	ret = clk_prepare_enable(i2c->clk);
-	if (ret)
-		return ret;
+	clk_prepare_enable(i2c->clk);
 
-	ret = of_property_read_u32(pdev->dev.of_node, "clock-frequency",
-				   &clk_freq);
-	if (ret) {
-		dev_err(&pdev->dev, "clock-frequency not specified in DT\n");
-		goto err;
+	if (of_property_read_u32(pdev->dev.of_node, "clock-frequency",
+				 &clk_freq)) {
+		dev_err(&pdev->dev, "clock-frequency not specified in DT");
+		return clk_freq;
 	}
 
 	i2c->speed = clk_freq / 1000;
-	if (i2c->speed == 0) {
-		ret = -EINVAL;
-		dev_err(&pdev->dev, "clock-frequency minimum is 1000\n");
-		goto err;
-	}
 	jz4780_i2c_set_speed(i2c);
 
 	dev_info(&pdev->dev, "Bus frequency is %d KHz\n", i2c->speed);
@@ -798,8 +789,10 @@ static int jz4780_i2c_probe(struct platform_device *pdev)
 	i2c->irq = platform_get_irq(pdev, 0);
 	ret = devm_request_irq(&pdev->dev, i2c->irq, jz4780_i2c_irq, 0,
 			       dev_name(&pdev->dev), i2c);
-	if (ret)
+	if (ret) {
+		ret = -ENODEV;
 		goto err;
+	}
 
 	ret = i2c_add_adapter(&i2c->adap);
 	if (ret < 0) {

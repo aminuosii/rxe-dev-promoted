@@ -908,7 +908,8 @@ static int bcm_enet_open(struct net_device *dev)
 		else
 			phydev->advertising &= ~SUPPORTED_Pause;
 
-		phy_attached_info(phydev);
+		dev_info(kdev, "attached PHY at address %d [%s]\n",
+			 phydev->addr, phydev->drv->name);
 
 		priv->old_link = 0;
 		priv->old_duplex = -1;
@@ -1332,6 +1333,7 @@ static void bcm_enet_get_drvinfo(struct net_device *netdev,
 		sizeof(drvinfo->version));
 	strlcpy(drvinfo->fw_version, "N/A", sizeof(drvinfo->fw_version));
 	strlcpy(drvinfo->bus_info, "bcm63xx", sizeof(drvinfo->bus_info));
+	drvinfo->n_stats = BCM_ENET_STATS_LEN;
 }
 
 static int bcm_enet_get_sset_count(struct net_device *netdev,
@@ -1848,8 +1850,17 @@ static int bcm_enet_probe(struct platform_device *pdev)
 		 * if a slave is not present on hw */
 		bus->phy_mask = ~(1 << priv->phy_id);
 
+		bus->irq = devm_kzalloc(&pdev->dev, sizeof(int) * PHY_MAX_ADDR,
+					GFP_KERNEL);
+		if (!bus->irq) {
+			ret = -ENOMEM;
+			goto out_free_mdio;
+		}
+
 		if (priv->has_phy_interrupt)
 			bus->irq[priv->phy_id] = priv->phy_interrupt;
+		else
+			bus->irq[priv->phy_id] = PHY_POLL;
 
 		ret = mdiobus_register(bus);
 		if (ret) {
@@ -2038,7 +2049,7 @@ static void swphy_poll_timer(unsigned long data)
 
 	for (i = 0; i < priv->num_ports; i++) {
 		struct bcm63xx_enetsw_port *port;
-		int val, j, up, advertise, lpa, speed, duplex, media;
+		int val, j, up, advertise, lpa, lpa2, speed, duplex, media;
 		int external_phy = bcm_enet_port_is_rgmii(i);
 		u8 override;
 
@@ -2081,27 +2092,22 @@ static void swphy_poll_timer(unsigned long data)
 		lpa = bcmenet_sw_mdio_read(priv, external_phy, port->phy_id,
 					   MII_LPA);
 
+		lpa2 = bcmenet_sw_mdio_read(priv, external_phy, port->phy_id,
+					    MII_STAT1000);
+
 		/* figure out media and duplex from advertise and LPA values */
 		media = mii_nway_result(lpa & advertise);
 		duplex = (media & ADVERTISE_FULL) ? 1 : 0;
+		if (lpa2 & LPA_1000FULL)
+			duplex = 1;
 
-		if (media & (ADVERTISE_100FULL | ADVERTISE_100HALF))
-			speed = 100;
-		else
-			speed = 10;
-
-		if (val & BMSR_ESTATEN) {
-			advertise = bcmenet_sw_mdio_read(priv, external_phy,
-						port->phy_id, MII_CTRL1000);
-
-			lpa = bcmenet_sw_mdio_read(priv, external_phy,
-						port->phy_id, MII_STAT1000);
-
-			if (advertise & (ADVERTISE_1000FULL | ADVERTISE_1000HALF)
-					&& lpa & (LPA_1000FULL | LPA_1000HALF)) {
-				speed = 1000;
-				duplex = (lpa & LPA_1000FULL);
-			}
+		if (lpa2 & (LPA_1000FULL | LPA_1000HALF))
+			speed = 1000;
+		else {
+			if (media & (ADVERTISE_100FULL | ADVERTISE_100HALF))
+				speed = 100;
+			else
+				speed = 10;
 		}
 
 		dev_info(&priv->pdev->dev,
@@ -2591,6 +2597,7 @@ static void bcm_enetsw_get_drvinfo(struct net_device *netdev,
 	strncpy(drvinfo->version, bcm_enet_driver_version, 32);
 	strncpy(drvinfo->fw_version, "N/A", 32);
 	strncpy(drvinfo->bus_info, "bcm63xx", 32);
+	drvinfo->n_stats = BCM_ENETSW_STATS_LEN;
 }
 
 static void bcm_enetsw_get_ethtool_stats(struct net_device *netdev,
@@ -2874,21 +2881,33 @@ struct platform_driver bcm63xx_enet_shared_driver = {
 	},
 };
 
-static struct platform_driver * const drivers[] = {
-	&bcm63xx_enet_shared_driver,
-	&bcm63xx_enet_driver,
-	&bcm63xx_enetsw_driver,
-};
-
 /* entry point */
 static int __init bcm_enet_init(void)
 {
-	return platform_register_drivers(drivers, ARRAY_SIZE(drivers));
+	int ret;
+
+	ret = platform_driver_register(&bcm63xx_enet_shared_driver);
+	if (ret)
+		return ret;
+
+	ret = platform_driver_register(&bcm63xx_enet_driver);
+	if (ret)
+		platform_driver_unregister(&bcm63xx_enet_shared_driver);
+
+	ret = platform_driver_register(&bcm63xx_enetsw_driver);
+	if (ret) {
+		platform_driver_unregister(&bcm63xx_enet_driver);
+		platform_driver_unregister(&bcm63xx_enet_shared_driver);
+	}
+
+	return ret;
 }
 
 static void __exit bcm_enet_exit(void)
 {
-	platform_unregister_drivers(drivers, ARRAY_SIZE(drivers));
+	platform_driver_unregister(&bcm63xx_enet_driver);
+	platform_driver_unregister(&bcm63xx_enetsw_driver);
+	platform_driver_unregister(&bcm63xx_enet_shared_driver);
 }
 
 

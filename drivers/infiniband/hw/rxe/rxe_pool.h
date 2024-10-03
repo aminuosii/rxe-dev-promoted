@@ -1,6 +1,6 @@
 /*
- * Copyright (c) 2016 Mellanox Technologies Ltd. All rights reserved.
- * Copyright (c) 2015 System Fabric Works, Inc. All rights reserved.
+ * Copyright (c) 2009-2011 Mellanox Technologies Ltd. All rights reserved.
+ * Copyright (c) 2009-2011 System Fabric Works, Inc. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -34,13 +34,15 @@
 #ifndef RXE_POOL_H
 #define RXE_POOL_H
 
+/* declarations for pools of managed objects */
+
 #define RXE_POOL_ALIGN		(16)
 #define RXE_POOL_CACHE_FLAGS	(0)
 
 enum rxe_pool_flags {
-	RXE_POOL_ATOMIC		= BIT(0),
-	RXE_POOL_INDEX		= BIT(1),
-	RXE_POOL_KEY		= BIT(2),
+	RXE_POOL_ATOMIC		= (1 << 0),
+	RXE_POOL_INDEX		= (1 << 1),
+	RXE_POOL_KEY		= (1 << 2),
 };
 
 enum rxe_elem_type {
@@ -52,6 +54,7 @@ enum rxe_elem_type {
 	RXE_TYPE_CQ,
 	RXE_TYPE_MR,
 	RXE_TYPE_MW,
+	RXE_TYPE_FMR,
 	RXE_TYPE_MC_GRP,
 	RXE_TYPE_MC_ELEM,
 	RXE_NUM_TYPES,		/* keep me last */
@@ -81,7 +84,7 @@ struct rxe_pool_entry {
 	struct kref		ref_cnt;
 	struct list_head	list;
 
-	/* only used if indexed or keyed */
+	/* only used if index'ed or key'ed */
 	struct rb_node		node;
 	u32			index;
 };
@@ -99,7 +102,7 @@ struct rxe_pool {
 	unsigned int		max_elem;
 	atomic_t		num_elem;
 
-	/* only used if indexed or keyed */
+	/* only used if index'ed or key'ed */
 	struct rb_root		tree;
 	unsigned long		*table;
 	size_t			table_size;
@@ -117,9 +120,8 @@ int rxe_cache_init(void);
 void rxe_cache_exit(void);
 
 /* initialize a pool of objects with given limit on
- * number of elements. gets parameters from rxe_type_info
- * pool elements will be allocated out of a slab cache
- */
+   number of elements. gets parameters from rxe_type_info
+   pool elements will be allocated out of a slab cache */
 int rxe_pool_init(struct rxe_dev *rxe, struct rxe_pool *pool,
 		  enum rxe_elem_type type, u32 max_elem);
 
@@ -130,16 +132,14 @@ int rxe_pool_cleanup(struct rxe_pool *pool);
 void *rxe_alloc(struct rxe_pool *pool);
 
 /* assign an index to an indexed object and insert object into
- *  pool's rb tree
- */
+   pool's rb tree */
 void rxe_add_index(void *elem);
 
 /* drop an index and remove object from rb tree */
 void rxe_drop_index(void *elem);
 
 /* assign a key to a keyed object and insert object into
- *  pool's rb tree
- */
+   pool's rb tree */
 void rxe_add_key(void *elem, void *key);
 
 /* remove elem from rb tree */

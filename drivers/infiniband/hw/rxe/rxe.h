@@ -1,6 +1,6 @@
 /*
- * Copyright (c) 2016 Mellanox Technologies Ltd. All rights reserved.
- * Copyright (c) 2015 System Fabric Works, Inc. All rights reserved.
+ * Copyright (c) 2009-2011 Mellanox Technologies Ltd. All rights reserved.
+ * Copyright (c) 2009-2011 System Fabric Works, Inc. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -55,23 +55,16 @@
 #define RXE_UVERBS_ABI_VERSION		(1)
 
 #define IB_PHYS_STATE_LINK_UP		(5)
-#define IB_PHYS_STATE_LINK_DOWN		(3)
 
-#define RXE_ROCE_V2_SPORT		(0xc000)
+#define RXE_IPV4_VERSION		(4)
 
-int rxe_set_mtu(struct rxe_dev *rxe, unsigned int dev_mtu);
+int rxe_set_mtu(struct rxe_dev *rxe, unsigned int dev_mtu,
+		unsigned int port_num);
 
 int rxe_add(struct rxe_dev *rxe, unsigned int mtu);
+
 void rxe_remove(struct rxe_dev *rxe);
-void rxe_remove_all(void);
 
 int rxe_rcv(struct sk_buff *skb);
-
-void rxe_dev_put(struct rxe_dev *rxe);
-struct rxe_dev *net_to_rxe(struct net_device *ndev);
-struct rxe_dev *get_rxe_by_name(const char* name);
-
-void rxe_port_up(struct rxe_dev *rxe);
-void rxe_port_down(struct rxe_dev *rxe);
 
 #endif /* RXE_H */

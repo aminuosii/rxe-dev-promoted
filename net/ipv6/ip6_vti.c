@@ -322,6 +322,7 @@ static int vti6_rcv(struct sk_buff *skb)
 		}
 
 		XFRM_TUNNEL_SKB_CB(skb)->tunnel.ip6 = t;
+		skb->mark = be32_to_cpu(t->parms.i_key);
 
 		rcu_read_unlock();
 
@@ -341,8 +342,6 @@ static int vti6_rcv_cb(struct sk_buff *skb, int err)
 	struct pcpu_sw_netstats *tstats;
 	struct xfrm_state *x;
 	struct ip6_tnl *t = XFRM_TUNNEL_SKB_CB(skb)->tunnel.ip6;
-	u32 orig_mark = skb->mark;
-	int ret;
 
 	if (!t)
 		return 1;
@@ -359,11 +358,7 @@ static int vti6_rcv_cb(struct sk_buff *skb, int err)
 	x = xfrm_input_state(skb);
 	family = x->inner_mode->afinfo->family;
 
-	skb->mark = be32_to_cpu(t->parms.i_key);
-	ret = xfrm_policy_check(NULL, XFRM_POLICY_IN, skb, family);
-	skb->mark = orig_mark;
-
-	if (!ret)
+	if (!xfrm_policy_check(NULL, XFRM_POLICY_IN, skb, family))
 		return -EPERM;
 
 	skb_scrub_packet(skb, !net_eq(t->net, dev_net(skb->dev)));
@@ -435,7 +430,6 @@ vti6_xmit(struct sk_buff *skb, struct net_device *dev, struct flowi *fl)
 	struct net_device *tdev;
 	struct xfrm_state *x;
 	int err = -1;
-	int mtu;
 
 	if (!dst)
 		goto tx_err_link_failure;
@@ -469,20 +463,7 @@ vti6_xmit(struct sk_buff *skb, struct net_device *dev, struct flowi *fl)
 	skb_dst_set(skb, dst);
 	skb->dev = skb_dst(skb)->dev;
 
-	mtu = dst_mtu(dst);
-	if (!skb->ignore_df && skb->len > mtu) {
-		skb_dst(skb)->ops->update_pmtu(dst, NULL, skb, mtu);
-
-		if (skb->protocol == htons(ETH_P_IPV6))
-			icmpv6_send(skb, ICMPV6_PKT_TOOBIG, 0, mtu);
-		else
-			icmp_send(skb, ICMP_DEST_UNREACH, ICMP_FRAG_NEEDED,
-				  htonl(mtu));
-
-		return -EMSGSIZE;
-	}
-
-	err = dst_output(t->net, skb->sk, skb);
+	err = dst_output(skb);
 	if (net_xmit_eval(err) == 0) {
 		struct pcpu_sw_netstats *tstats = this_cpu_ptr(dev->tstats);
 
@@ -514,6 +495,7 @@ vti6_tnl_xmit(struct sk_buff *skb, struct net_device *dev)
 	int ret;
 
 	memset(&fl, 0, sizeof(fl));
+	skb->mark = be32_to_cpu(t->parms.o_key);
 
 	switch (skb->protocol) {
 	case htons(ETH_P_IPV6):
@@ -533,9 +515,6 @@ vti6_tnl_xmit(struct sk_buff *skb, struct net_device *dev)
 	default:
 		goto tx_err;
 	}
-
-	/* override mark with tunnel output key */
-	fl.flowi_mark = be32_to_cpu(t->parms.o_key);
 
 	ret = vti6_xmit(skb, dev, &fl);
 	if (ret < 0)
@@ -640,7 +619,7 @@ vti6_tnl_change(struct ip6_tnl *t, const struct __ip6_tnl_parm *p)
 	t->parms.i_key = p->i_key;
 	t->parms.o_key = p->o_key;
 	t->parms.proto = p->proto;
-	dst_cache_reset(&t->dst_cache);
+	ip6_tnl_dst_reset(t);
 	vti6_link_config(t);
 	return 0;
 }

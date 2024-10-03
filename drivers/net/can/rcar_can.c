@@ -241,16 +241,17 @@ static void rcar_can_error(struct net_device *ndev)
 		u8 ecsr;
 
 		netdev_dbg(priv->ndev, "Bus error interrupt:\n");
-		if (skb)
+		if (skb) {
 			cf->can_id |= CAN_ERR_BUSERROR | CAN_ERR_PROT;
-
+			cf->data[2] = CAN_ERR_PROT_UNSPEC;
+		}
 		ecsr = readb(&priv->regs->ecsr);
 		if (ecsr & RCAR_CAN_ECSR_ADEF) {
 			netdev_dbg(priv->ndev, "ACK Delimiter Error\n");
 			tx_errors++;
 			writeb(~RCAR_CAN_ECSR_ADEF, &priv->regs->ecsr);
 			if (skb)
-				cf->data[3] = CAN_ERR_PROT_LOC_ACK_DEL;
+				cf->data[3] |= CAN_ERR_PROT_LOC_ACK_DEL;
 		}
 		if (ecsr & RCAR_CAN_ECSR_BE0F) {
 			netdev_dbg(priv->ndev, "Bit Error (dominant)\n");
@@ -271,7 +272,7 @@ static void rcar_can_error(struct net_device *ndev)
 			rx_errors++;
 			writeb(~RCAR_CAN_ECSR_CEF, &priv->regs->ecsr);
 			if (skb)
-				cf->data[3] = CAN_ERR_PROT_LOC_CRC_SEQ;
+				cf->data[3] |= CAN_ERR_PROT_LOC_CRC_SEQ;
 		}
 		if (ecsr & RCAR_CAN_ECSR_AEF) {
 			netdev_dbg(priv->ndev, "ACK Error\n");
@@ -279,7 +280,7 @@ static void rcar_can_error(struct net_device *ndev)
 			writeb(~RCAR_CAN_ECSR_AEF, &priv->regs->ecsr);
 			if (skb) {
 				cf->can_id |= CAN_ERR_ACK;
-				cf->data[3] = CAN_ERR_PROT_LOC_ACK;
+				cf->data[3] |= CAN_ERR_PROT_LOC_ACK;
 			}
 		}
 		if (ecsr & RCAR_CAN_ECSR_FEF) {
@@ -507,8 +508,7 @@ static int rcar_can_open(struct net_device *ndev)
 
 	err = clk_prepare_enable(priv->clk);
 	if (err) {
-		netdev_err(ndev,
-			   "failed to enable peripheral clock, error %d\n",
+		netdev_err(ndev, "failed to enable periperal clock, error %d\n",
 			   err);
 		goto out;
 	}
@@ -526,8 +526,7 @@ static int rcar_can_open(struct net_device *ndev)
 	napi_enable(&priv->napi);
 	err = request_irq(ndev->irq, rcar_can_interrupt, 0, ndev->name, ndev);
 	if (err) {
-		netdev_err(ndev, "request_irq(%d) failed, error %d\n",
-			   ndev->irq, err);
+		netdev_err(ndev, "error requesting interrupt %x\n", ndev->irq);
 		goto out_close;
 	}
 	can_led_event(ndev, CAN_LED_EVENT_OPEN);
@@ -759,9 +758,8 @@ static int rcar_can_probe(struct platform_device *pdev)
 	}
 
 	irq = platform_get_irq(pdev, 0);
-	if (irq < 0) {
+	if (!irq) {
 		dev_err(&pdev->dev, "No IRQ resource\n");
-		err = irq;
 		goto fail;
 	}
 
@@ -784,8 +782,7 @@ static int rcar_can_probe(struct platform_device *pdev)
 	priv->clk = devm_clk_get(&pdev->dev, "clkp1");
 	if (IS_ERR(priv->clk)) {
 		err = PTR_ERR(priv->clk);
-		dev_err(&pdev->dev, "cannot get peripheral clock, error %d\n",
-			err);
+		dev_err(&pdev->dev, "cannot get peripheral clock: %d\n", err);
 		goto fail_clk;
 	}
 
@@ -797,7 +794,7 @@ static int rcar_can_probe(struct platform_device *pdev)
 	priv->can_clk = devm_clk_get(&pdev->dev, clock_names[clock_select]);
 	if (IS_ERR(priv->can_clk)) {
 		err = PTR_ERR(priv->can_clk);
-		dev_err(&pdev->dev, "cannot get CAN clock, error %d\n", err);
+		dev_err(&pdev->dev, "cannot get CAN clock: %d\n", err);
 		goto fail_clk;
 	}
 
@@ -826,7 +823,7 @@ static int rcar_can_probe(struct platform_device *pdev)
 
 	devm_can_led_init(ndev);
 
-	dev_info(&pdev->dev, "device registered (regs @ %p, IRQ%d)\n",
+	dev_info(&pdev->dev, "device registered (reg_base=%p, irq=%u)\n",
 		 priv->regs, ndev->irq);
 
 	return 0;
@@ -904,9 +901,6 @@ static const struct of_device_id rcar_can_of_table[] __maybe_unused = {
 	{ .compatible = "renesas,can-r8a7779" },
 	{ .compatible = "renesas,can-r8a7790" },
 	{ .compatible = "renesas,can-r8a7791" },
-	{ .compatible = "renesas,rcar-gen1-can" },
-	{ .compatible = "renesas,rcar-gen2-can" },
-	{ .compatible = "renesas,rcar-gen3-can" },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, rcar_can_of_table);

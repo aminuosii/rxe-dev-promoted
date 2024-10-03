@@ -1,6 +1,6 @@
 /*
- * Copyright (c) 2016 Mellanox Technologies Ltd. All rights reserved.
- * Copyright (c) 2015 System Fabric Works, Inc. All rights reserved.
+ * Copyright (c) 2009-2011 Mellanox Technologies Ltd. All rights reserved.
+ * Copyright (c) 2009-2011 System Fabric Works, Inc. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -80,13 +80,30 @@ static void rxe_mem_init(int access, struct rxe_mem *mem)
 	if (mem->pelem.pool->type == RXE_TYPE_MR) {
 		mem->ibmr.lkey		= lkey;
 		mem->ibmr.rkey		= rkey;
+	} else {
+		mem->ibfmr.lkey		= lkey;
+		mem->ibfmr.rkey		= rkey;
 	}
 
+	mem->pd			= NULL;
+	mem->umem		= NULL;
 	mem->lkey		= lkey;
 	mem->rkey		= rkey;
 	mem->state		= RXE_MEM_STATE_INVALID;
 	mem->type		= RXE_MEM_TYPE_NONE;
+	mem->va			= 0;
+	mem->iova		= 0;
+	mem->length		= 0;
+	mem->offset		= 0;
+	mem->access		= 0;
+	mem->page_shift		= 0;
+	mem->page_mask		= 0;
 	mem->map_shift		= ilog2(RXE_BUF_PER_MAP);
+	mem->map_mask		= 0;
+	mem->num_buf		= 0;
+	mem->max_buf		= 0;
+	mem->num_map		= 0;
+	mem->map		= NULL;
 }
 
 void rxe_mem_cleanup(void *arg)
@@ -123,14 +140,14 @@ static int rxe_mem_alloc(struct rxe_dev *rxe, struct rxe_mem *mem, int num_buf)
 			goto err2;
 	}
 
-	WARN_ON(!is_power_of_2(RXE_BUF_PER_MAP));
+	BUG_ON(!is_power_of_2(RXE_BUF_PER_MAP));
 
 	mem->map_shift	= ilog2(RXE_BUF_PER_MAP);
 	mem->map_mask	= RXE_BUF_PER_MAP - 1;
 
 	mem->num_buf = num_buf;
 	mem->num_map = num_map;
-	mem->max_buf = num_map * RXE_BUF_PER_MAP;
+	mem->max_buf = num_map*RXE_BUF_PER_MAP;
 
 	return 0;
 
@@ -156,13 +173,70 @@ int rxe_mem_init_dma(struct rxe_dev *rxe, struct rxe_pd *pd,
 	return 0;
 }
 
+int rxe_mem_init_phys(struct rxe_dev *rxe, struct rxe_pd *pd, int access,
+		      u64 iova, struct ib_phys_buf *phys_buf, int num_buf,
+		      struct rxe_mem *mem)
+{
+	int i;
+	struct rxe_map **map;
+	struct ib_phys_buf *buf;
+	size_t length;
+	int err;
+	size_t min_size = (size_t)(-1L);
+	size_t max_size = 0;
+	int n;
+
+	rxe_mem_init(access, mem);
+
+	err = rxe_mem_alloc(rxe, mem, num_buf);
+	if (err)
+		goto err1;
+
+	length			= 0;
+	map			= mem->map;
+	buf			= map[0]->buf;
+	n			= 0;
+
+	for (i = 0; i < num_buf; i++) {
+		length	+= phys_buf->size;
+		max_size = max_t(int, max_size, phys_buf->size);
+		min_size = min_t(int, min_size, phys_buf->size);
+		*buf++	= *phys_buf++;
+		n++;
+
+		if (n == RXE_BUF_PER_MAP) {
+			map++;
+			buf = map[0]->buf;
+			n = 0;
+		}
+	}
+
+	if (max_size == min_size && is_power_of_2(max_size)) {
+		mem->page_shift		= ilog2(max_size);
+		mem->page_mask		= max_size - 1;
+	}
+
+	mem->pd			= pd;
+	mem->access		= access;
+	mem->iova		= iova;
+	mem->va			= iova;
+	mem->length		= length;
+	mem->state		= RXE_MEM_STATE_VALID;
+	mem->type		= RXE_MEM_TYPE_MR;
+
+	return 0;
+
+err1:
+	return err;
+}
+
 int rxe_mem_init_user(struct rxe_dev *rxe, struct rxe_pd *pd, u64 start,
 		      u64 length, u64 iova, int access, struct ib_udata *udata,
-		      struct rxe_mem *mem)
+	struct rxe_mem *mem)
 {
 	int			entry;
 	struct rxe_map		**map;
-	struct rxe_phys_buf	*buf = NULL;
+	struct ib_phys_buf	*buf = NULL;
 	struct ib_umem		*umem;
 	struct scatterlist	*sg;
 	int			num_buf;
@@ -189,7 +263,7 @@ int rxe_mem_init_user(struct rxe_dev *rxe, struct rxe_pd *pd, u64 start,
 		goto err1;
 	}
 
-	WARN_ON(!is_power_of_2(umem->page_size));
+	BUG_ON(!is_power_of_2(umem->page_size));
 
 	mem->page_shift		= ilog2(umem->page_size);
 	mem->page_mask		= umem->page_size - 1;
@@ -241,19 +315,62 @@ int rxe_mem_init_fast(struct rxe_dev *rxe, struct rxe_pd *pd,
 {
 	int err;
 
-	rxe_mem_init(0, mem);
-
-	/* In fastreg, we also set the rkey */
-	mem->ibmr.rkey = mem->ibmr.lkey;
+	rxe_mem_init(0, mem);	/* TODO what access does this have */
 
 	err = rxe_mem_alloc(rxe, mem, max_pages);
 	if (err)
 		goto err1;
 
+	/* TODO what page size do we assume */
+
 	mem->pd			= pd;
 	mem->max_buf		= max_pages;
 	mem->state		= RXE_MEM_STATE_FREE;
 	mem->type		= RXE_MEM_TYPE_MR;
+
+	return 0;
+
+err1:
+	return err;
+}
+
+int rxe_mem_init_mw(struct rxe_dev *rxe, struct rxe_pd *pd,
+		    struct rxe_mem *mem)
+{
+	rxe_mem_init(0, mem);
+
+	mem->pd			= pd;
+	mem->state		= RXE_MEM_STATE_FREE;
+	mem->type		= RXE_MEM_TYPE_MW;
+
+	return 0;
+}
+
+int rxe_mem_init_fmr(struct rxe_dev *rxe, struct rxe_pd *pd, int access,
+		     struct ib_fmr_attr *attr, struct rxe_mem *mem)
+{
+	int err;
+
+	if (attr->max_maps > rxe->attr.max_map_per_fmr) {
+		pr_warn("max_mmaps = %d too big, max_map_per_fmr = %d\n",
+			attr->max_maps, rxe->attr.max_map_per_fmr);
+		err = -EINVAL;
+		goto err1;
+	}
+
+	rxe_mem_init(access, mem);
+
+	err = rxe_mem_alloc(rxe, mem, attr->max_pages);
+	if (err)
+		goto err1;
+
+	mem->pd			= pd;
+	mem->access		= access;
+	mem->page_shift		 = attr->page_shift;
+	mem->page_mask		= (1 << attr->page_shift) - 1;
+	mem->max_buf		= attr->max_pages;
+	mem->state		= RXE_MEM_STATE_FREE;
+	mem->type		= RXE_MEM_TYPE_FMR;
 
 	return 0;
 
@@ -339,9 +456,8 @@ out:
 }
 
 /* copy data from a range (vaddr, vaddr+length-1) to or from
- * a mem object starting at iova. Compute incremental value of
- * crc32 if crcp is not zero. caller must hold a reference to mem
- */
+   a mem object starting at iova. Compute incremental value of
+   crc32 if crcp is not zero. caller must hold a reference to mem */
 int rxe_mem_copy(struct rxe_mem *mem, u64 iova, void *addr, int length,
 		 enum copy_direction dir, u32 *crcp)
 {
@@ -349,19 +465,19 @@ int rxe_mem_copy(struct rxe_mem *mem, u64 iova, void *addr, int length,
 	int			bytes;
 	u8			*va;
 	struct rxe_map		**map;
-	struct rxe_phys_buf	*buf;
+	struct ib_phys_buf	*buf;
 	int			m;
 	int			i;
 	size_t			offset;
 	u32			crc = crcp ? (*crcp) : 0;
 
 	if (mem->type == RXE_MEM_TYPE_DMA) {
-		u8 *src, *dest;
+		uint8_t *src, *dest;
 
-		src  = (dir == to_mem_obj) ?
+		src  = (dir == direction_in) ?
 			addr : ((void *)(uintptr_t)iova);
 
-		dest = (dir == to_mem_obj) ?
+		dest = (dir == direction_in) ?
 			((void *)(uintptr_t)iova) : addr;
 
 		if (crcp)
@@ -372,7 +488,7 @@ int rxe_mem_copy(struct rxe_mem *mem, u64 iova, void *addr, int length,
 		return 0;
 	}
 
-	WARN_ON(!mem->map);
+	BUG_ON(!mem->map);
 
 	err = mem_check_range(mem, iova, length);
 	if (err) {
@@ -386,11 +502,11 @@ int rxe_mem_copy(struct rxe_mem *mem, u64 iova, void *addr, int length,
 	buf	= map[0]->buf + i;
 
 	while (length > 0) {
-		u8 *src, *dest;
+		uint8_t *src, *dest;
 
 		va	= (u8 *)(uintptr_t)buf->addr + offset;
-		src  = (dir == to_mem_obj) ? addr : va;
-		dest = (dir == to_mem_obj) ? va : addr;
+		src  = (dir == direction_in) ? addr : va;
+		dest = (dir == direction_in) ? va : addr;
 
 		bytes	= buf->size - offset;
 
@@ -426,8 +542,7 @@ err1:
 }
 
 /* copy data in or out of a wqe, i.e. sg list
- * under the control of a dma descriptor
- */
+   under the control of a dma descriptor */
 int copy_data(
 	struct rxe_dev		*rxe,
 	struct rxe_pd		*pd,
@@ -556,12 +671,11 @@ int advance_dma_data(struct rxe_dma_info *dma, unsigned int length)
 	return 0;
 }
 
-/* (1) find the mem (mr or mw) corresponding to lkey/rkey
- *     depending on lookup_type
- * (2) verify that the (qp) pd matches the mem pd
- * (3) verify that the mem can support the requested access
- * (4) verify that mem state is valid
- */
+/* (1) find the mem (mr, fmr or mw) corresponding to lkey/rkey
+       depending on lookup_type
+   (2) verify that the (qp) pd matches the mem pd
+   (3) verify that the mem can support the requested access
+   (4) verify that mem state is valid */
 struct rxe_mem *lookup_mem(struct rxe_pd *pd, int access, u32 key,
 			   enum lookup_type type)
 {
@@ -571,6 +685,14 @@ struct rxe_mem *lookup_mem(struct rxe_pd *pd, int access, u32 key,
 
 	if (index >= RXE_MIN_MR_INDEX && index <= RXE_MAX_MR_INDEX) {
 		mem = rxe_pool_get_index(&rxe->mr_pool, index);
+		if (!mem)
+			goto err1;
+	} else if (index >= RXE_MIN_FMR_INDEX && index <= RXE_MAX_FMR_INDEX) {
+		mem = rxe_pool_get_index(&rxe->fmr_pool, index);
+		if (!mem)
+			goto err1;
+	} else if (index >= RXE_MIN_MW_INDEX && index <= RXE_MAX_MW_INDEX) {
+		mem = rxe_pool_get_index(&rxe->mw_pool, index);
 		if (!mem)
 			goto err1;
 	} else {
@@ -605,7 +727,7 @@ int rxe_mem_map_pages(struct rxe_dev *rxe, struct rxe_mem *mem,
 	int num_buf;
 	int err;
 	struct rxe_map **map;
-	struct rxe_phys_buf *buf;
+	struct ib_phys_buf *buf;
 	int page_size;
 
 	if (num_pages > mem->max_buf) {

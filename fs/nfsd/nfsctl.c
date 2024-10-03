@@ -1250,15 +1250,15 @@ static int __init init_nfsd(void)
 	int retval;
 	printk(KERN_INFO "Installing knfsd (copyright (C) 1996 okir@monad.swb.de).\n");
 
-	retval = register_pernet_subsys(&nfsd_net_ops);
-	if (retval < 0)
-		return retval;
 	retval = register_cld_notifier();
 	if (retval)
-		goto out_unregister_pernet;
+		return retval;
+	retval = register_pernet_subsys(&nfsd_net_ops);
+	if (retval < 0)
+		goto out_unregister_notifier;
 	retval = nfsd4_init_slabs();
 	if (retval)
-		goto out_unregister_notifier;
+		goto out_unregister_pernet;
 	retval = nfsd4_init_pnfs();
 	if (retval)
 		goto out_free_slabs;
@@ -1290,10 +1290,10 @@ out_exit_pnfs:
 	nfsd4_exit_pnfs();
 out_free_slabs:
 	nfsd4_free_slabs();
-out_unregister_notifier:
-	unregister_cld_notifier();
 out_unregister_pernet:
 	unregister_pernet_subsys(&nfsd_net_ops);
+out_unregister_notifier:
+	unregister_cld_notifier();
 	return retval;
 }
 
@@ -1308,8 +1308,8 @@ static void __exit exit_nfsd(void)
 	nfsd4_exit_pnfs();
 	nfsd_fault_inject_cleanup();
 	unregister_filesystem(&nfsd_fs_type);
-	unregister_cld_notifier();
 	unregister_pernet_subsys(&nfsd_net_ops);
+	unregister_cld_notifier();
 }
 
 MODULE_AUTHOR("Olaf Kirch <okir@monad.swb.de>");

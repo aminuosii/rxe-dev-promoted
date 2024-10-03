@@ -28,9 +28,9 @@
 #include <media/v4l2-device.h>
 #include <media/v4l2-ioctl.h>
 #include <media/v4l2-mem2mem.h>
-#include <media/videobuf2-v4l2.h>
+#include <media/videobuf2-core.h>
 #include <media/videobuf2-dma-contig.h>
-#include <media/drv-intf/exynos-fimc.h>
+#include <media/exynos-fimc.h>
 
 #include "common.h"
 #include "fimc-core.h"
@@ -200,7 +200,7 @@ static int fimc_lite_reinit(struct fimc_lite *fimc, bool suspend)
 	/* Release unused buffers */
 	while (!suspend && !list_empty(&fimc->pending_buf_q)) {
 		buf = fimc_lite_pending_queue_pop(fimc);
-		vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_ERROR);
+		vb2_buffer_done(&buf->vb, VB2_BUF_STATE_ERROR);
 	}
 	/* If suspending put unused buffers onto pending queue */
 	while (!list_empty(&fimc->active_buf_q)) {
@@ -208,7 +208,7 @@ static int fimc_lite_reinit(struct fimc_lite *fimc, bool suspend)
 		if (suspend)
 			fimc_lite_pending_queue_add(fimc, buf);
 		else
-			vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_ERROR);
+			vb2_buffer_done(&buf->vb, VB2_BUF_STATE_ERROR);
 	}
 
 	spin_unlock_irqrestore(&fimc->slock, flags);
@@ -254,6 +254,8 @@ static irqreturn_t flite_irq_handler(int irq, void *priv)
 	struct fimc_lite *fimc = priv;
 	struct flite_buffer *vbuf;
 	unsigned long flags;
+	struct timeval *tv;
+	struct timespec ts;
 	u32 intsrc;
 
 	spin_lock_irqsave(&fimc->slock, flags);
@@ -292,10 +294,13 @@ static irqreturn_t flite_irq_handler(int irq, void *priv)
 	    test_bit(ST_FLITE_RUN, &fimc->state) &&
 	    !list_empty(&fimc->active_buf_q)) {
 		vbuf = fimc_lite_active_queue_pop(fimc);
-		vbuf->vb.vb2_buf.timestamp = ktime_get_ns();
-		vbuf->vb.sequence = fimc->frame_count++;
+		ktime_get_ts(&ts);
+		tv = &vbuf->vb.v4l2_buf.timestamp;
+		tv->tv_sec = ts.tv_sec;
+		tv->tv_usec = ts.tv_nsec / NSEC_PER_USEC;
+		vbuf->vb.v4l2_buf.sequence = fimc->frame_count++;
 		flite_hw_mask_dma_buffer(fimc, vbuf->index);
-		vb2_buffer_done(&vbuf->vb.vb2_buf, VB2_BUF_STATE_DONE);
+		vb2_buffer_done(&vbuf->vb, VB2_BUF_STATE_DONE);
 	}
 
 	if (test_bit(ST_FLITE_CONFIG, &fimc->state))
@@ -355,34 +360,36 @@ static void stop_streaming(struct vb2_queue *q)
 	fimc_lite_stop_capture(fimc, false);
 }
 
-static int queue_setup(struct vb2_queue *vq,
+static int queue_setup(struct vb2_queue *vq, const struct v4l2_format *pfmt,
 		       unsigned int *num_buffers, unsigned int *num_planes,
 		       unsigned int sizes[], void *allocators[])
 {
+	const struct v4l2_pix_format_mplane *pixm = NULL;
 	struct fimc_lite *fimc = vq->drv_priv;
 	struct flite_frame *frame = &fimc->out_frame;
 	const struct fimc_fmt *fmt = frame->fmt;
-	unsigned long wh = frame->f_width * frame->f_height;
+	unsigned long wh;
 	int i;
+
+	if (pfmt) {
+		pixm = &pfmt->fmt.pix_mp;
+		fmt = fimc_lite_find_format(&pixm->pixelformat, NULL, 0, -1);
+		wh = pixm->width * pixm->height;
+	} else {
+		wh = frame->f_width * frame->f_height;
+	}
 
 	if (fmt == NULL)
 		return -EINVAL;
 
-	if (*num_planes) {
-		if (*num_planes != fmt->memplanes)
-			return -EINVAL;
-		for (i = 0; i < *num_planes; i++) {
-			if (sizes[i] < (wh * fmt->depth[i]) / 8)
-				return -EINVAL;
-			allocators[i] = fimc->alloc_ctx;
-		}
-		return 0;
-	}
-
 	*num_planes = fmt->memplanes;
 
 	for (i = 0; i < fmt->memplanes; i++) {
-		sizes[i] = (wh * fmt->depth[i]) / 8;
+		unsigned int size = (wh * fmt->depth[i]) / 8;
+		if (pixm)
+			sizes[i] = max(size, pixm->plane_fmt[i].sizeimage);
+		else
+			sizes[i] = size;
 		allocators[i] = fimc->alloc_ctx;
 	}
 
@@ -415,9 +422,8 @@ static int buffer_prepare(struct vb2_buffer *vb)
 
 static void buffer_queue(struct vb2_buffer *vb)
 {
-	struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
 	struct flite_buffer *buf
-		= container_of(vbuf, struct flite_buffer, vb);
+		= container_of(vb, struct flite_buffer, vb);
 	struct fimc_lite *fimc = vb2_get_drv_priv(vb->vb2_queue);
 	unsigned long flags;
 
@@ -494,7 +500,7 @@ static int fimc_lite_open(struct file *file)
 	    atomic_read(&fimc->out_path) != FIMC_IO_DMA)
 		goto unlock;
 
-	mutex_lock(&me->graph_obj.mdev->graph_mutex);
+	mutex_lock(&me->parent->graph_mutex);
 
 	ret = fimc_pipeline_call(&fimc->ve, open, me, true);
 
@@ -502,7 +508,7 @@ static int fimc_lite_open(struct file *file)
 	if (ret == 0)
 		me->use_count++;
 
-	mutex_unlock(&me->graph_obj.mdev->graph_mutex);
+	mutex_unlock(&me->parent->graph_mutex);
 
 	if (!ret) {
 		fimc_lite_clear_event_counters(fimc);
@@ -535,9 +541,9 @@ static int fimc_lite_release(struct file *file)
 		fimc_pipeline_call(&fimc->ve, close);
 		clear_bit(ST_FLITE_IN_USE, &fimc->state);
 
-		mutex_lock(&entity->graph_obj.mdev->graph_mutex);
+		mutex_lock(&entity->parent->graph_mutex);
 		entity->use_count--;
-		mutex_unlock(&entity->graph_obj.mdev->graph_mutex);
+		mutex_unlock(&entity->parent->graph_mutex);
 	}
 
 	_vb2_fop_release(file, NULL);
@@ -562,7 +568,7 @@ static const struct v4l2_file_operations fimc_lite_fops = {
  */
 
 static const struct fimc_fmt *fimc_lite_subdev_try_fmt(struct fimc_lite *fimc,
-					struct v4l2_subdev_pad_config *cfg,
+					struct v4l2_subdev_fh *fh,
 					struct v4l2_subdev_format *format)
 {
 	struct flite_drvdata *dd = fimc->dd;
@@ -586,13 +592,13 @@ static const struct fimc_fmt *fimc_lite_subdev_try_fmt(struct fimc_lite *fimc,
 		struct v4l2_rect *rect;
 
 		if (format->which == V4L2_SUBDEV_FORMAT_TRY) {
-			sink_fmt = v4l2_subdev_get_try_format(&fimc->subdev, cfg,
+			sink_fmt = v4l2_subdev_get_try_format(fh,
 						FLITE_SD_PAD_SINK);
 
 			mf->code = sink_fmt->code;
 			mf->colorspace = sink_fmt->colorspace;
 
-			rect = v4l2_subdev_get_try_crop(&fimc->subdev, cfg,
+			rect = v4l2_subdev_get_try_crop(fh,
 						FLITE_SD_PAD_SINK);
 		} else {
 			mf->code = sink->fmt->mbus_code;
@@ -808,7 +814,8 @@ static int fimc_pipeline_validate(struct fimc_lite *fimc)
 		}
 		/* Retrieve format at the source pad */
 		pad = media_entity_remote_pad(pad);
-		if (!pad || !is_media_entity_v4l2_subdev(pad->entity))
+		if (pad == NULL ||
+		    media_entity_type(pad->entity) != MEDIA_ENT_T_V4L2_SUBDEV)
 			break;
 
 		sd = media_entity_to_v4l2_subdev(pad->entity);
@@ -981,6 +988,7 @@ static int fimc_lite_link_setup(struct media_entity *entity,
 {
 	struct v4l2_subdev *sd = media_entity_to_v4l2_subdev(entity);
 	struct fimc_lite *fimc = v4l2_get_subdevdata(sd);
+	unsigned int remote_ent_type = media_entity_type(remote->entity);
 	int ret = 0;
 
 	if (WARN_ON(fimc == NULL))
@@ -992,6 +1000,10 @@ static int fimc_lite_link_setup(struct media_entity *entity,
 
 	switch (local->index) {
 	case FLITE_SD_PAD_SINK:
+		if (remote_ent_type != MEDIA_ENT_T_V4L2_SUBDEV) {
+			ret = -EINVAL;
+			break;
+		}
 		if (flags & MEDIA_LNK_FL_ENABLED) {
 			if (fimc->source_subdev_grp_id == 0)
 				fimc->source_subdev_grp_id = sd->grp_id;
@@ -1006,15 +1018,19 @@ static int fimc_lite_link_setup(struct media_entity *entity,
 	case FLITE_SD_PAD_SOURCE_DMA:
 		if (!(flags & MEDIA_LNK_FL_ENABLED))
 			atomic_set(&fimc->out_path, FIMC_IO_NONE);
-		else
+		else if (remote_ent_type == MEDIA_ENT_T_DEVNODE)
 			atomic_set(&fimc->out_path, FIMC_IO_DMA);
+		else
+			ret = -EINVAL;
 		break;
 
 	case FLITE_SD_PAD_SOURCE_ISP:
 		if (!(flags & MEDIA_LNK_FL_ENABLED))
 			atomic_set(&fimc->out_path, FIMC_IO_NONE);
-		else
+		else if (remote_ent_type == MEDIA_ENT_T_V4L2_SUBDEV)
 			atomic_set(&fimc->out_path, FIMC_IO_ISP);
+		else
+			ret = -EINVAL;
 		break;
 
 	default:
@@ -1031,7 +1047,7 @@ static const struct media_entity_operations fimc_lite_subdev_media_ops = {
 };
 
 static int fimc_lite_subdev_enum_mbus_code(struct v4l2_subdev *sd,
-					   struct v4l2_subdev_pad_config *cfg,
+					   struct v4l2_subdev_fh *fh,
 					   struct v4l2_subdev_mbus_code_enum *code)
 {
 	const struct fimc_fmt *fmt;
@@ -1044,17 +1060,16 @@ static int fimc_lite_subdev_enum_mbus_code(struct v4l2_subdev *sd,
 }
 
 static struct v4l2_mbus_framefmt *__fimc_lite_subdev_get_try_fmt(
-		struct v4l2_subdev *sd,
-		struct v4l2_subdev_pad_config *cfg, unsigned int pad)
+			struct v4l2_subdev_fh *fh, unsigned int pad)
 {
 	if (pad != FLITE_SD_PAD_SINK)
 		pad = FLITE_SD_PAD_SOURCE_DMA;
 
-	return v4l2_subdev_get_try_format(sd, cfg, pad);
+	return v4l2_subdev_get_try_format(fh, pad);
 }
 
 static int fimc_lite_subdev_get_fmt(struct v4l2_subdev *sd,
-				    struct v4l2_subdev_pad_config *cfg,
+				    struct v4l2_subdev_fh *fh,
 				    struct v4l2_subdev_format *fmt)
 {
 	struct fimc_lite *fimc = v4l2_get_subdevdata(sd);
@@ -1062,7 +1077,7 @@ static int fimc_lite_subdev_get_fmt(struct v4l2_subdev *sd,
 	struct flite_frame *f = &fimc->inp_frame;
 
 	if (fmt->which == V4L2_SUBDEV_FORMAT_TRY) {
-		mf = __fimc_lite_subdev_get_try_fmt(sd, cfg, fmt->pad);
+		mf = __fimc_lite_subdev_get_try_fmt(fh, fmt->pad);
 		fmt->format = *mf;
 		return 0;
 	}
@@ -1085,7 +1100,7 @@ static int fimc_lite_subdev_get_fmt(struct v4l2_subdev *sd,
 }
 
 static int fimc_lite_subdev_set_fmt(struct v4l2_subdev *sd,
-				    struct v4l2_subdev_pad_config *cfg,
+				    struct v4l2_subdev_fh *fh,
 				    struct v4l2_subdev_format *fmt)
 {
 	struct fimc_lite *fimc = v4l2_get_subdevdata(sd);
@@ -1107,17 +1122,17 @@ static int fimc_lite_subdev_set_fmt(struct v4l2_subdev *sd,
 		return -EBUSY;
 	}
 
-	ffmt = fimc_lite_subdev_try_fmt(fimc, cfg, fmt);
+	ffmt = fimc_lite_subdev_try_fmt(fimc, fh, fmt);
 
 	if (fmt->which == V4L2_SUBDEV_FORMAT_TRY) {
 		struct v4l2_mbus_framefmt *src_fmt;
 
-		mf = __fimc_lite_subdev_get_try_fmt(sd, cfg, fmt->pad);
+		mf = __fimc_lite_subdev_get_try_fmt(fh, fmt->pad);
 		*mf = fmt->format;
 
 		if (fmt->pad == FLITE_SD_PAD_SINK) {
 			unsigned int pad = FLITE_SD_PAD_SOURCE_DMA;
-			src_fmt = __fimc_lite_subdev_get_try_fmt(sd, cfg, pad);
+			src_fmt = __fimc_lite_subdev_get_try_fmt(fh, pad);
 			*src_fmt = *mf;
 		}
 
@@ -1145,7 +1160,7 @@ static int fimc_lite_subdev_set_fmt(struct v4l2_subdev *sd,
 }
 
 static int fimc_lite_subdev_get_selection(struct v4l2_subdev *sd,
-					  struct v4l2_subdev_pad_config *cfg,
+					  struct v4l2_subdev_fh *fh,
 					  struct v4l2_subdev_selection *sel)
 {
 	struct fimc_lite *fimc = v4l2_get_subdevdata(sd);
@@ -1157,7 +1172,7 @@ static int fimc_lite_subdev_get_selection(struct v4l2_subdev *sd,
 		return -EINVAL;
 
 	if (sel->which == V4L2_SUBDEV_FORMAT_TRY) {
-		sel->r = *v4l2_subdev_get_try_crop(sd, cfg, sel->pad);
+		sel->r = *v4l2_subdev_get_try_crop(fh, sel->pad);
 		return 0;
 	}
 
@@ -1180,7 +1195,7 @@ static int fimc_lite_subdev_get_selection(struct v4l2_subdev *sd,
 }
 
 static int fimc_lite_subdev_set_selection(struct v4l2_subdev *sd,
-					  struct v4l2_subdev_pad_config *cfg,
+					  struct v4l2_subdev_fh *fh,
 					  struct v4l2_subdev_selection *sel)
 {
 	struct fimc_lite *fimc = v4l2_get_subdevdata(sd);
@@ -1194,7 +1209,7 @@ static int fimc_lite_subdev_set_selection(struct v4l2_subdev *sd,
 	fimc_lite_try_crop(fimc, &sel->r);
 
 	if (sel->which == V4L2_SUBDEV_FORMAT_TRY) {
-		*v4l2_subdev_get_try_crop(sd, cfg, sel->pad) = sel->r;
+		*v4l2_subdev_get_try_crop(fh, sel->pad) = sel->r;
 	} else {
 		unsigned long flags;
 		spin_lock_irqsave(&fimc->slock, flags);
@@ -1306,7 +1321,7 @@ static int fimc_lite_subdev_registered(struct v4l2_subdev *sd)
 		return ret;
 
 	fimc->vd_pad.flags = MEDIA_PAD_FL_SINK;
-	ret = media_entity_pads_init(&vfd->entity, 1, &fimc->vd_pad);
+	ret = media_entity_init(&vfd->entity, 1, &fimc->vd_pad, 0);
 	if (ret < 0)
 		return ret;
 
@@ -1420,8 +1435,8 @@ static int fimc_lite_create_capture_subdev(struct fimc_lite *fimc)
 	fimc->subdev_pads[FLITE_SD_PAD_SINK].flags = MEDIA_PAD_FL_SINK;
 	fimc->subdev_pads[FLITE_SD_PAD_SOURCE_DMA].flags = MEDIA_PAD_FL_SOURCE;
 	fimc->subdev_pads[FLITE_SD_PAD_SOURCE_ISP].flags = MEDIA_PAD_FL_SOURCE;
-	ret = media_entity_pads_init(&sd->entity, FLITE_SD_PADS_NUM,
-				fimc->subdev_pads);
+	ret = media_entity_init(&sd->entity, FLITE_SD_PADS_NUM,
+				fimc->subdev_pads, 0);
 	if (ret)
 		return ret;
 
@@ -1621,7 +1636,7 @@ static int fimc_lite_resume(struct device *dev)
 		if (list_empty(&fimc->pending_buf_q))
 			break;
 		buf = fimc_lite_pending_queue_pop(fimc);
-		buffer_queue(&buf->vb.vb2_buf);
+		buffer_queue(&buf->vb);
 	}
 	return 0;
 }

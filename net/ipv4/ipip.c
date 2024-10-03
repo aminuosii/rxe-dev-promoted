@@ -103,6 +103,7 @@
 #include <linux/tcp.h>
 #include <linux/udp.h>
 #include <linux/if_arp.h>
+#include <linux/mroute.h>
 #include <linux/init.h>
 #include <linux/netfilter_ipv4.h>
 #include <linux/if_ether.h>
@@ -195,9 +196,9 @@ static int ipip_rcv(struct sk_buff *skb)
 	if (tunnel) {
 		if (!xfrm4_policy_check(NULL, XFRM_POLICY_IN, skb))
 			goto drop;
-		if (iptunnel_pull_header(skb, 0, tpi.proto, false))
+		if (iptunnel_pull_header(skb, 0, tpi.proto))
 			goto drop;
-		return ip_tunnel_rcv(tunnel, skb, &tpi, NULL, log_ecn_error);
+		return ip_tunnel_rcv(tunnel, skb, &tpi, log_ecn_error);
 	}
 
 	return -1;
@@ -219,8 +220,9 @@ static netdev_tx_t ipip_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 	if (unlikely(skb->protocol != htons(ETH_P_IP)))
 		goto tx_error;
 
-	if (iptunnel_handle_offloads(skb, SKB_GSO_IPXIP4))
-		goto tx_error;
+	skb = iptunnel_handle_offloads(skb, false, SKB_GSO_IPIP);
+	if (IS_ERR(skb))
+		goto out;
 
 	skb_set_inner_ipproto(skb, IPPROTO_IPIP);
 
@@ -229,7 +231,7 @@ static netdev_tx_t ipip_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 
 tx_error:
 	kfree_skb(skb);
-
+out:
 	dev->stats.tx_errors++;
 	return NETDEV_TX_OK;
 }
@@ -249,8 +251,10 @@ ipip_tunnel_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 			return -EINVAL;
 	}
 
-	p.i_key = p.o_key = 0;
-	p.i_flags = p.o_flags = 0;
+	p.i_key = p.o_key = p.i_flags = p.o_flags = 0;
+	if (p.iph.ttl)
+		p.iph.frag_off |= htons(IP_DF);
+
 	err = ip_tunnel_ioctl(dev, &p, cmd);
 	if (err)
 		return err;

@@ -62,7 +62,7 @@ vmlinux_link()
 			-Wl,--start-group                                    \
 				 ${KBUILD_VMLINUX_MAIN}                      \
 			-Wl,--end-group                                      \
-			-lutil -lrt -lpthread ${1}
+			-lutil ${1}
 		rm -f linux
 	fi
 }
@@ -82,21 +82,20 @@ kallsyms()
 		kallsymopt="${kallsymopt} --all-symbols"
 	fi
 
-	if [ -n "${CONFIG_KALLSYMS_ABSOLUTE_PERCPU}" ]; then
-		kallsymopt="${kallsymopt} --absolute-percpu"
+	if [ -n "${CONFIG_ARM}" ] && [ -n "${CONFIG_PAGE_OFFSET}" ]; then
+		kallsymopt="${kallsymopt} --page-offset=$CONFIG_PAGE_OFFSET"
 	fi
 
-	if [ -n "${CONFIG_KALLSYMS_BASE_RELATIVE}" ]; then
-		kallsymopt="${kallsymopt} --base-relative"
+	if [ -n "${CONFIG_X86_64}" ]; then
+		kallsymopt="${kallsymopt} --absolute-percpu"
 	fi
 
 	local aflags="${KBUILD_AFLAGS} ${KBUILD_AFLAGS_KERNEL}               \
 		      ${NOSTDINC_FLAGS} ${LINUXINCLUDE} ${KBUILD_CPPFLAGS}"
 
-	local afile="`basename ${2} .o`.S"
-
-	${NM} -n ${1} | scripts/kallsyms ${kallsymopt} > ${afile}
-	${CC} ${aflags} -c -o ${2} ${afile}
+	${NM} -n ${1} | \
+		scripts/kallsyms ${kallsymopt} | \
+		${CC} ${aflags} -c -o ${2} -x assembler-with-cpp -
 }
 
 # Create map file with all symbols from ${1}
@@ -112,6 +111,7 @@ sortextable()
 }
 
 # Delete output files in case of error
+trap cleanup SIGHUP SIGINT SIGQUIT SIGTERM ERR
 cleanup()
 {
 	rm -f .old_version
@@ -123,20 +123,6 @@ cleanup()
 	rm -f vmlinux
 	rm -f vmlinux.o
 }
-
-on_exit()
-{
-	if [ $? -ne 0 ]; then
-		cleanup
-	fi
-}
-trap on_exit EXIT
-
-on_signals()
-{
-	exit 1
-}
-trap on_signals HUP INT QUIT TERM
 
 #
 #
@@ -245,6 +231,7 @@ if [ -n "${CONFIG_KALLSYMS}" ]; then
 	if ! cmp -s System.map .tmp_System.map; then
 		echo >&2 Inconsistent kallsyms data
 		echo >&2 Try "make KALLSYMS_EXTRA_PASS=1" as a workaround
+		cleanup
 		exit 1
 	fi
 fi

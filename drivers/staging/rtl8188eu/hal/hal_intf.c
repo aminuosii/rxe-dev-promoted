@@ -11,6 +11,11 @@
  * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
  * more details.
  *
+ * You should have received a copy of the GNU General Public License along with
+ * this program; if not, write to the Free Software Foundation, Inc.,
+ * 51 Franklin Street, Fifth Floor, Boston, MA 02110, USA
+ *
+ *
  ******************************************************************************/
 
 #define _HAL_INTF_C_
@@ -126,6 +131,14 @@ void rtw_hal_get_hwreg(struct adapter *adapt, u8 variable, u8 *val)
 		adapt->HalFunc.GetHwRegHandler(adapt, variable, val);
 }
 
+u8 rtw_hal_set_def_var(struct adapter *adapt, enum hal_def_variable var,
+		      void *val)
+{
+	if (adapt->HalFunc.SetHalDefVarHandler)
+		return adapt->HalFunc.SetHalDefVarHandler(adapt, var, val);
+	return _FAIL;
+}
+
 u8 rtw_hal_get_def_var(struct adapter *adapt,
 		       enum hal_def_variable var, void *val)
 {
@@ -141,6 +154,22 @@ void rtw_hal_set_odm_var(struct adapter *adapt,
 	if (adapt->HalFunc.SetHalODMVarHandler)
 		adapt->HalFunc.SetHalODMVarHandler(adapt, var,
 						      val1, set);
+}
+
+void rtw_hal_enable_interrupt(struct adapter *adapt)
+{
+	if (adapt->HalFunc.enable_interrupt)
+		adapt->HalFunc.enable_interrupt(adapt);
+	else
+		DBG_88E("%s: HalFunc.enable_interrupt is NULL!\n", __func__);
+}
+
+void rtw_hal_disable_interrupt(struct adapter *adapt)
+{
+	if (adapt->HalFunc.disable_interrupt)
+		adapt->HalFunc.disable_interrupt(adapt);
+	else
+		DBG_88E("%s: HalFunc.disable_interrupt is NULL!\n", __func__);
 }
 
 u32 rtw_hal_inirp_init(struct adapter *adapt)
@@ -173,7 +202,6 @@ s32 rtw_hal_xmit(struct adapter *adapt, struct xmit_frame *pxmitframe)
 s32 rtw_hal_mgnt_xmit(struct adapter *adapt, struct xmit_frame *pmgntframe)
 {
 	s32 ret = _FAIL;
-
 	if (adapt->HalFunc.mgnt_xmit)
 		ret = adapt->HalFunc.mgnt_xmit(adapt, pmgntframe);
 	return ret;
@@ -181,7 +209,7 @@ s32 rtw_hal_mgnt_xmit(struct adapter *adapt, struct xmit_frame *pmgntframe)
 
 s32 rtw_hal_init_xmit_priv(struct adapter *adapt)
 {
-	if (adapt->HalFunc.init_xmit_priv)
+	if (adapt->HalFunc.init_xmit_priv != NULL)
 		return adapt->HalFunc.init_xmit_priv(adapt);
 	return _FAIL;
 }
@@ -208,7 +236,6 @@ void rtw_hal_update_ra_mask(struct adapter *adapt, u32 mac_id, u8 rssi_level)
 #ifdef CONFIG_88EU_AP_MODE
 		struct sta_info *psta = NULL;
 		struct sta_priv *pstapriv = &adapt->stapriv;
-
 		if ((mac_id-1) > 0)
 			psta = pstapriv->sta_aid[(mac_id-1) - 1];
 		if (psta)
@@ -238,6 +265,14 @@ u32 rtw_hal_read_rfreg(struct adapter *adapt, enum rf_radio_path rfpath,
 		data = adapt->HalFunc.read_rfreg(adapt, rfpath, regaddr,
 						    bitmask);
 	return data;
+}
+
+void rtw_hal_write_rfreg(struct adapter *adapt, enum rf_radio_path rfpath,
+			 u32 regaddr, u32 bitmask, u32 data)
+{
+	if (adapt->HalFunc.write_rfreg)
+		adapt->HalFunc.write_rfreg(adapt, rfpath, regaddr,
+					      bitmask, data);
 }
 
 void rtw_hal_set_bwmode(struct adapter *adapt,

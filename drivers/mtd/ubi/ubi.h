@@ -49,19 +49,15 @@
 /* UBI name used for character devices, sysfs, etc */
 #define UBI_NAME_STR "ubi"
 
-struct ubi_device;
-
 /* Normal UBI messages */
-__printf(2, 3)
-void ubi_msg(const struct ubi_device *ubi, const char *fmt, ...);
-
+#define ubi_msg(ubi, fmt, ...) pr_notice(UBI_NAME_STR "%d: " fmt "\n", \
+					 ubi->ubi_num, ##__VA_ARGS__)
 /* UBI warning messages */
-__printf(2, 3)
-void ubi_warn(const struct ubi_device *ubi, const char *fmt, ...);
-
+#define ubi_warn(ubi, fmt, ...) pr_warn(UBI_NAME_STR "%d warning: %s: " fmt "\n", \
+					ubi->ubi_num, __func__, ##__VA_ARGS__)
 /* UBI error messages */
-__printf(2, 3)
-void ubi_err(const struct ubi_device *ubi, const char *fmt, ...);
+#define ubi_err(ubi, fmt, ...) pr_err(UBI_NAME_STR "%d error: %s: " fmt "\n", \
+				      ubi->ubi_num, __func__, ##__VA_ARGS__)
 
 /* Background thread name pattern */
 #define UBI_BGT_NAME_PATTERN "ubi_bgt%dd"
@@ -466,7 +462,6 @@ struct ubi_debug_info {
  * @fm_eba_sem: allows ubi_update_fastmap() to block EBA table changes
  * @fm_work: fastmap work queue
  * @fm_work_scheduled: non-zero if fastmap work was scheduled
- * @fast_attach: non-zero if UBI was attached by fastmap
  *
  * @used: RB-tree of used physical eraseblocks
  * @erroneous: RB-tree of erroneous used physical eraseblocks
@@ -575,7 +570,6 @@ struct ubi_device {
 	size_t fm_size;
 	struct work_struct fm_work;
 	int fm_work_scheduled;
-	int fast_attach;
 
 	/* Wear-leveling sub-system's stuff */
 	struct rb_root used;
@@ -781,7 +775,7 @@ extern struct kmem_cache *ubi_wl_entry_slab;
 extern const struct file_operations ubi_ctrl_cdev_operations;
 extern const struct file_operations ubi_cdev_operations;
 extern const struct file_operations ubi_vol_cdev_operations;
-extern struct class ubi_class;
+extern struct class *ubi_class;
 extern struct mutex ubi_devices_mutex;
 extern struct blocking_notifier_head ubi_notifiers;
 

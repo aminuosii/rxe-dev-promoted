@@ -106,8 +106,7 @@ int __dlm_lockres_unused(struct dlm_lock_resource *res)
 	if (!list_empty(&res->dirty) || res->state & DLM_LOCK_RES_DIRTY)
 		return 0;
 
-	if (res->state & (DLM_LOCK_RES_RECOVERING|
-			DLM_LOCK_RES_RECOVERY_WAITING))
+	if (res->state & DLM_LOCK_RES_RECOVERING)
 		return 0;
 
 	/* Another node has this resource with this node as the master */
@@ -203,13 +202,6 @@ static void dlm_purge_lockres(struct dlm_ctxt *dlm,
 		dlm->purge_count--;
 	}
 
-	if (!master && ret != 0) {
-		mlog(0, "%s: deref %.*s in progress or master goes down\n",
-			dlm->name, res->lockname.len, res->lockname.name);
-		spin_unlock(&res->spinlock);
-		return;
-	}
-
 	if (!__dlm_lockres_unused(res)) {
 		mlog(ML_ERROR, "%s: res %.*s in use after deref\n",
 		     dlm->name, res->lockname.len, res->lockname.name);
@@ -218,16 +210,6 @@ static void dlm_purge_lockres(struct dlm_ctxt *dlm,
 	}
 
 	__dlm_unhash_lockres(dlm, res);
-
-	spin_lock(&dlm->track_lock);
-	if (!list_empty(&res->tracking))
-		list_del_init(&res->tracking);
-	else {
-		mlog(ML_ERROR, "Resource %.*s not on the Tracking list\n",
-				res->lockname.len, res->lockname.name);
-		__dlm_print_one_lock_resource(res);
-	}
-	spin_unlock(&dlm->track_lock);
 
 	/* lockres is not in the hash now.  drop the flag and wake up
 	 * any processes waiting in dlm_get_lock_resource. */
@@ -501,8 +483,7 @@ int dlm_launch_thread(struct dlm_ctxt *dlm)
 {
 	mlog(0, "Starting dlm_thread...\n");
 
-	dlm->dlm_thread_task = kthread_run(dlm_thread, dlm, "dlm-%s",
-			dlm->name);
+	dlm->dlm_thread_task = kthread_run(dlm_thread, dlm, "dlm_thread");
 	if (IS_ERR(dlm->dlm_thread_task)) {
 		mlog_errno(PTR_ERR(dlm->dlm_thread_task));
 		dlm->dlm_thread_task = NULL;
@@ -708,8 +689,7 @@ static int dlm_thread(void *data)
 			 * dirty for a short while. */
 			BUG_ON(res->state & DLM_LOCK_RES_MIGRATING);
 			if (res->state & (DLM_LOCK_RES_IN_PROGRESS |
-					  DLM_LOCK_RES_RECOVERING |
-					  DLM_LOCK_RES_RECOVERY_WAITING)) {
+					  DLM_LOCK_RES_RECOVERING)) {
 				/* move it to the tail and keep going */
 				res->state &= ~DLM_LOCK_RES_DIRTY;
 				spin_unlock(&res->spinlock);

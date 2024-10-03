@@ -59,9 +59,7 @@
 #include <linux/of_device.h>
 #include <linux/of_gpio.h>
 #include <linux/of_net.h>
-#include <linux/acpi.h>
 #include <linux/pm_runtime.h>
-#include <linux/property.h>
 
 #include "smsc911x.h"
 
@@ -809,17 +807,22 @@ static int smsc911x_phy_check_loopbackpkt(struct smsc911x_data *pdata)
 
 static int smsc911x_phy_reset(struct smsc911x_data *pdata)
 {
+	struct phy_device *phy_dev = pdata->phy_dev;
 	unsigned int temp;
 	unsigned int i = 100000;
 
-	temp = smsc911x_reg_read(pdata, PMT_CTRL);
-	smsc911x_reg_write(pdata, PMT_CTRL, temp | PMT_CTRL_PHY_RST_);
+	BUG_ON(!phy_dev);
+	BUG_ON(!phy_dev->bus);
+
+	SMSC_TRACE(pdata, hw, "Performing PHY BCR Reset");
+	smsc911x_mii_write(phy_dev->bus, phy_dev->addr, MII_BMCR, BMCR_RESET);
 	do {
 		msleep(1);
-		temp = smsc911x_reg_read(pdata, PMT_CTRL);
-	} while ((i--) && (temp & PMT_CTRL_PHY_RST_));
+		temp = smsc911x_mii_read(phy_dev->bus, phy_dev->addr,
+			MII_BMCR);
+	} while ((i--) && (temp & BMCR_RESET));
 
-	if (unlikely(temp & PMT_CTRL_PHY_RST_)) {
+	if (temp & BMCR_RESET) {
 		SMSC_WARN(pdata, hw, "PHY reset failed to complete");
 		return -EIO;
 	}
@@ -864,8 +867,8 @@ static int smsc911x_phy_loopbacktest(struct net_device *dev)
 
 	for (i = 0; i < 10; i++) {
 		/* Set PHY to 10/FD, no ANEG, and loopback mode */
-		smsc911x_mii_write(phy_dev->mdio.bus, phy_dev->mdio.addr,
-				   MII_BMCR, BMCR_LOOPBACK | BMCR_FULLDPLX);
+		smsc911x_mii_write(phy_dev->bus, phy_dev->addr,	MII_BMCR,
+			BMCR_LOOPBACK | BMCR_FULLDPLX);
 
 		/* Enable MAC tx/rx, FD */
 		spin_lock_irqsave(&pdata->mac_lock, flags);
@@ -893,7 +896,7 @@ static int smsc911x_phy_loopbacktest(struct net_device *dev)
 	spin_unlock_irqrestore(&pdata->mac_lock, flags);
 
 	/* Cancel PHY loopback mode */
-	smsc911x_mii_write(phy_dev->mdio.bus, phy_dev->mdio.addr, MII_BMCR, 0);
+	smsc911x_mii_write(phy_dev->bus, phy_dev->addr, MII_BMCR, 0);
 
 	smsc911x_reg_write(pdata, TX_CFG, 0);
 	smsc911x_reg_write(pdata, RX_CFG, 0);
@@ -1021,7 +1024,7 @@ static int smsc911x_mii_probe(struct net_device *dev)
 	}
 
 	SMSC_TRACE(pdata, probe, "PHY: addr %d, phy_id 0x%08X",
-		   phydev->mdio.addr, phydev->phy_id);
+		   phydev->addr, phydev->phy_id);
 
 	ret = phy_connect_direct(dev, phydev, &smsc911x_phy_adjust_link,
 				 pdata->config.phy_interface);
@@ -1031,7 +1034,9 @@ static int smsc911x_mii_probe(struct net_device *dev)
 		return ret;
 	}
 
-	phy_attached_info(phydev);
+	netdev_info(dev,
+		    "attached PHY driver [%s] (mii_bus:phy_addr=%s, irq=%d)\n",
+		    phydev->drv->name, dev_name(&phydev->dev), phydev->irq);
 
 	/* mask with MAC supported features */
 	phydev->supported &= (PHY_BASIC_FEATURES | SUPPORTED_Pause |
@@ -1045,7 +1050,6 @@ static int smsc911x_mii_probe(struct net_device *dev)
 #ifdef USE_PHY_WORK_AROUND
 	if (smsc911x_phy_loopbacktest(dev) < 0) {
 		SMSC_WARN(pdata, hw, "Failed Loop Back Test");
-		phy_disconnect(phydev);
 		return -ENODEV;
 	}
 	SMSC_TRACE(pdata, hw, "Passed Loop Back Test");
@@ -1059,7 +1063,7 @@ static int smsc911x_mii_init(struct platform_device *pdev,
 			     struct net_device *dev)
 {
 	struct smsc911x_data *pdata = netdev_priv(dev);
-	int err = -ENXIO;
+	int err = -ENXIO, i;
 
 	pdata->mii_bus = mdiobus_alloc();
 	if (!pdata->mii_bus) {
@@ -1073,7 +1077,9 @@ static int smsc911x_mii_init(struct platform_device *pdev,
 	pdata->mii_bus->priv = pdata;
 	pdata->mii_bus->read = smsc911x_mii_read;
 	pdata->mii_bus->write = smsc911x_mii_write;
-	memcpy(pdata->mii_bus->irq, pdata->phy_irq, sizeof(pdata->mii_bus));
+	pdata->mii_bus->irq = pdata->phy_irq;
+	for (i = 0; i < PHY_MAX_ADDR; ++i)
+		pdata->mii_bus->irq[i] = PHY_POLL;
 
 	pdata->mii_bus->parent = &pdev->dev;
 
@@ -1988,8 +1994,7 @@ smsc911x_ethtool_getregs(struct net_device *dev, struct ethtool_regs *regs,
 	}
 
 	for (i = 0; i <= 31; i++)
-		data[j++] = smsc911x_mii_read(phy_dev->mdio.bus,
-					      phy_dev->mdio.addr, i);
+		data[j++] = smsc911x_mii_read(phy_dev->bus, phy_dev->addr, i);
 }
 
 static void smsc911x_eeprom_enable_access(struct smsc911x_data *pdata)
@@ -2288,7 +2293,7 @@ static int smsc911x_init(struct net_device *dev)
 	}
 
 	/* Reset the LAN911x */
-	if (smsc911x_phy_reset(pdata) || smsc911x_soft_reset(pdata))
+	if (smsc911x_soft_reset(pdata))
 		return -ENODEV;
 
 	dev->flags |= IFF_MULTICAST;
@@ -2357,56 +2362,65 @@ static const struct smsc911x_ops shifted_smsc911x_ops = {
 	.tx_writefifo = smsc911x_tx_writefifo_shift,
 };
 
-static int smsc911x_probe_config(struct smsc911x_platform_config *config,
-				 struct device *dev)
+#ifdef CONFIG_OF
+static int smsc911x_probe_config_dt(struct smsc911x_platform_config *config,
+				    struct device_node *np)
 {
-	int phy_interface;
+	const char *mac;
 	u32 width = 0;
-	int err;
 
-	phy_interface = device_get_phy_mode(dev);
-	if (phy_interface < 0)
-		phy_interface = PHY_INTERFACE_MODE_NA;
-	config->phy_interface = phy_interface;
+	if (!np)
+		return -ENODEV;
 
-	device_get_mac_address(dev, config->mac, ETH_ALEN);
+	config->phy_interface = of_get_phy_mode(np);
 
-	err = device_property_read_u32(dev, "reg-io-width", &width);
-	if (err == -ENXIO)
-		return err;
-	if (!err && width == 4)
+	mac = of_get_mac_address(np);
+	if (mac)
+		memcpy(config->mac, mac, ETH_ALEN);
+
+	of_property_read_u32(np, "reg-shift", &config->shift);
+
+	of_property_read_u32(np, "reg-io-width", &width);
+	if (width == 4)
 		config->flags |= SMSC911X_USE_32BIT;
 	else
 		config->flags |= SMSC911X_USE_16BIT;
 
-	device_property_read_u32(dev, "reg-shift", &config->shift);
-
-	if (device_property_present(dev, "smsc,irq-active-high"))
+	if (of_get_property(np, "smsc,irq-active-high", NULL))
 		config->irq_polarity = SMSC911X_IRQ_POLARITY_ACTIVE_HIGH;
 
-	if (device_property_present(dev, "smsc,irq-push-pull"))
+	if (of_get_property(np, "smsc,irq-push-pull", NULL))
 		config->irq_type = SMSC911X_IRQ_TYPE_PUSH_PULL;
 
-	if (device_property_present(dev, "smsc,force-internal-phy"))
+	if (of_get_property(np, "smsc,force-internal-phy", NULL))
 		config->flags |= SMSC911X_FORCE_INTERNAL_PHY;
 
-	if (device_property_present(dev, "smsc,force-external-phy"))
+	if (of_get_property(np, "smsc,force-external-phy", NULL))
 		config->flags |= SMSC911X_FORCE_EXTERNAL_PHY;
 
-	if (device_property_present(dev, "smsc,save-mac-address"))
+	if (of_get_property(np, "smsc,save-mac-address", NULL))
 		config->flags |= SMSC911X_SAVE_MAC_ADDRESS;
 
 	return 0;
 }
+#else
+static inline int smsc911x_probe_config_dt(
+				struct smsc911x_platform_config *config,
+				struct device_node *np)
+{
+	return -ENODEV;
+}
+#endif /* CONFIG_OF */
 
 static int smsc911x_drv_probe(struct platform_device *pdev)
 {
+	struct device_node *np = pdev->dev.of_node;
 	struct net_device *dev;
 	struct smsc911x_data *pdata;
 	struct smsc911x_platform_config *config = dev_get_platdata(&pdev->dev);
-	struct resource *res;
+	struct resource *res, *irq_res;
 	unsigned int intcfg = 0;
-	int res_size, irq, irq_flags;
+	int res_size, irq_flags;
 	int retval;
 
 	res = platform_get_resource_byname(pdev, IORESOURCE_MEM,
@@ -2420,11 +2434,8 @@ static int smsc911x_drv_probe(struct platform_device *pdev)
 	}
 	res_size = resource_size(res);
 
-	irq = platform_get_irq(pdev, 0);
-	if (irq == -EPROBE_DEFER) {
-		retval = -EPROBE_DEFER;
-		goto out_0;
-	} else if (irq <= 0) {
+	irq_res = platform_get_resource(pdev, IORESOURCE_IRQ, 0);
+	if (!irq_res) {
 		pr_warn("Could not allocate irq resource\n");
 		retval = -ENODEV;
 		goto out_0;
@@ -2444,8 +2455,8 @@ static int smsc911x_drv_probe(struct platform_device *pdev)
 	SET_NETDEV_DEV(dev, &pdev->dev);
 
 	pdata = netdev_priv(dev);
-	dev->irq = irq;
-	irq_flags = irq_get_trigger_type(irq);
+	dev->irq = irq_res->start;
+	irq_flags = irq_res->flags & IRQF_TRIGGER_MASK;
 	pdata->ioaddr = ioremap_nocache(res->start, res_size);
 
 	pdata->dev = dev;
@@ -2467,7 +2478,7 @@ static int smsc911x_drv_probe(struct platform_device *pdev)
 		goto out_disable_resources;
 	}
 
-	retval = smsc911x_probe_config(&pdata->config, &pdev->dev);
+	retval = smsc911x_probe_config_dt(&pdata->config, np);
 	if (retval && config) {
 		/* copy config parameters across to pdata */
 		memcpy(&pdata->config, config, sizeof(pdata->config));
@@ -2643,12 +2654,6 @@ static const struct of_device_id smsc911x_dt_ids[] = {
 MODULE_DEVICE_TABLE(of, smsc911x_dt_ids);
 #endif
 
-static const struct acpi_device_id smsc911x_acpi_match[] = {
-	{ "ARMH9118", 0 },
-	{ }
-};
-MODULE_DEVICE_TABLE(acpi, smsc911x_acpi_match);
-
 static struct platform_driver smsc911x_driver = {
 	.probe = smsc911x_drv_probe,
 	.remove = smsc911x_drv_remove,
@@ -2656,7 +2661,6 @@ static struct platform_driver smsc911x_driver = {
 		.name	= SMSC_CHIPNAME,
 		.pm	= SMSC911X_PM_OPS,
 		.of_match_table = of_match_ptr(smsc911x_dt_ids),
-		.acpi_match_table = ACPI_PTR(smsc911x_acpi_match),
 	},
 };
 

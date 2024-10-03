@@ -1,6 +1,6 @@
 /*
- * Copyright (c) 2016 Mellanox Technologies Ltd. All rights reserved.
- * Copyright (c) 2015 System Fabric Works, Inc. All rights reserved.
+ * Copyright (c) 2009-2011 Mellanox Technologies Ltd. All rights reserved.
+ * Copyright (c) 2009-2011 System Fabric Works, Inc. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -52,8 +52,8 @@ enum comp_state {
 	COMPST_ERROR_RETRY,
 	COMPST_RNR_RETRY,
 	COMPST_ERROR,
-	COMPST_EXIT, /* We have an issue, and we want to rerun the completer */
-	COMPST_DONE, /* The completer finished successflly */
+	COMPST_EXIT,
+	COMPST_DONE,
 };
 
 static char *comp_state_name[] =  {
@@ -129,7 +129,7 @@ static enum ib_wc_opcode wr_to_wc_opcode(enum ib_wr_opcode opcode)
 	case IB_WR_SEND_WITH_INV:		return IB_WC_SEND;
 	case IB_WR_RDMA_READ_WITH_INV:		return IB_WC_RDMA_READ;
 	case IB_WR_LOCAL_INV:			return IB_WC_LOCAL_INV;
-	case IB_WR_REG_MR:			return IB_WC_REG_MR;
+	case IB_WR_FAST_REG_MR:			return IB_WC_FAST_REG_MR;
 
 	default:
 		return 0xff;
@@ -163,9 +163,8 @@ static inline enum comp_state get_wqe(struct rxe_qp *qp,
 {
 	struct rxe_send_wqe *wqe;
 
-	/* we come here whether or not we found a response packet to see if
-	 * there are any posted WQEs
-	 */
+	/* we come here whether or not we found a response packet
+	   to see if there are any posted WQEs */
 	wqe = queue_head(qp->sq.queue);
 	*wqe_p = wqe;
 
@@ -197,9 +196,8 @@ static inline enum comp_state check_psn(struct rxe_qp *qp,
 {
 	s32 diff;
 
-	/* check to see if response is past the oldest WQE. if it is, complete
-	 * send/write or error read/atomic
-	 */
+	/* check to see if response is past the oldest WQE
+	   if it is, complete send/write or error read/atomic */
 	diff = psn_compare(pkt->psn, wqe->last_psn);
 	if (diff > 0) {
 		if (wqe->state == wqe_state_pending) {
@@ -216,9 +214,9 @@ static inline enum comp_state check_psn(struct rxe_qp *qp,
 	/* compare response packet to expected response */
 	diff = psn_compare(pkt->psn, qp->comp.psn);
 	if (diff < 0) {
-		/* response is most likely a retried packet if it matches an
-		 * uncompleted WQE go complete it else ignore it
-		 */
+		/* response is most likely a retried packet
+		   if it matches an uncompleted WQE go complete it
+		   else ignore it */
 		if (pkt->psn == wqe->last_psn)
 			return COMPST_COMP_ACK;
 		else
@@ -242,6 +240,7 @@ static inline enum comp_state check_ack(struct rxe_qp *qp,
 	case -1:
 		/* Will catch all *_ONLY cases. */
 		if (!(mask & RXE_START_MASK))
+			/* TODO check spec. retry/discard ? */
 			return COMPST_ERROR;
 
 		break;
@@ -250,6 +249,7 @@ static inline enum comp_state check_ack(struct rxe_qp *qp,
 	case IB_OPCODE_RC_RDMA_READ_RESPONSE_MIDDLE:
 		if (pkt->opcode != IB_OPCODE_RC_RDMA_READ_RESPONSE_MIDDLE &&
 		    pkt->opcode != IB_OPCODE_RC_RDMA_READ_RESPONSE_LAST) {
+			/* TODO check spec. retry/discard ? */
 			return COMPST_ERROR;
 		}
 		break;
@@ -268,11 +268,11 @@ static inline enum comp_state check_ack(struct rxe_qp *qp,
 			return COMPST_ERROR;
 
 		/* Fall through (IB_OPCODE_RC_RDMA_READ_RESPONSE_MIDDLE
-		 * doesn't have an AETH)
-		 */
+		 * doesn't have an AETH) */
 	case IB_OPCODE_RC_RDMA_READ_RESPONSE_MIDDLE:
 		if (wqe->wr.opcode != IB_WR_RDMA_READ &&
 		    wqe->wr.opcode != IB_WR_RDMA_READ_WITH_INV) {
+			/* TODO check spec. retry/discard ? */
 			return COMPST_ERROR;
 		}
 		reset_retry_counters(qp);
@@ -286,6 +286,7 @@ static inline enum comp_state check_ack(struct rxe_qp *qp,
 
 		if (wqe->wr.opcode != IB_WR_ATOMIC_CMP_AND_SWP &&
 		    wqe->wr.opcode != IB_WR_ATOMIC_FETCH_AND_ADD)
+			/* TODO check spec. retry/discard ? */
 			return COMPST_ERROR;
 		reset_retry_counters(qp);
 		return COMPST_ATOMIC;
@@ -303,9 +304,8 @@ static inline enum comp_state check_ack(struct rxe_qp *qp,
 		case AETH_NAK:
 			switch (syn) {
 			case AETH_NAK_PSN_SEQ_ERROR:
-				/* a nak implicitly acks all packets with psns
-				 * before
-				 */
+				/* a nak implicitly acks all
+				   packets with psns before */
 				if (psn_compare(pkt->psn, qp->comp.psn) > 0) {
 					qp->comp.psn = pkt->psn;
 					if (qp->req.wait_psn) {
@@ -332,6 +332,7 @@ static inline enum comp_state check_ack(struct rxe_qp *qp,
 				wqe->status = IB_WC_REM_OP_ERR;
 				return COMPST_ERROR;
 			}
+			return COMPST_ERROR;
 
 		default:
 			return COMPST_ERROR;
@@ -339,9 +340,10 @@ static inline enum comp_state check_ack(struct rxe_qp *qp,
 		break;
 
 	default:
-		pr_warn("unexpected opcode\n");
+		WARN_ON(1);
 	}
 
+	WARN_ON(1);
 	return COMPST_ERROR;
 }
 
@@ -354,7 +356,7 @@ static inline enum comp_state do_read(struct rxe_qp *qp,
 
 	ret = copy_data(rxe, qp->pd, IB_ACCESS_LOCAL_WRITE,
 			&wqe->dma, payload_addr(pkt),
-			payload_size(pkt), to_mem_obj, NULL);
+			payload_size(pkt), direction_in, NULL);
 	if (ret)
 		return COMPST_ERROR;
 
@@ -375,7 +377,7 @@ static inline enum comp_state do_atomic(struct rxe_qp *qp,
 
 	ret = copy_data(rxe, qp->pd, IB_ACCESS_LOCAL_WRITE,
 			&wqe->dma, &atomic_orig,
-			sizeof(u64), to_mem_obj, NULL);
+			sizeof(u64), direction_in, NULL);
 	if (ret)
 		return COMPST_ERROR;
 	else
@@ -393,9 +395,6 @@ static void make_send_cqe(struct rxe_qp *qp, struct rxe_send_wqe *wqe,
 		wc->wr_id		= wqe->wr.wr_id;
 		wc->status		= wqe->status;
 		wc->opcode		= wr_to_wc_opcode(wqe->wr.opcode);
-		if (wqe->wr.opcode == IB_WR_RDMA_WRITE_WITH_IMM ||
-		    wqe->wr.opcode == IB_WR_SEND_WITH_IMM)
-			wc->wc_flags = IB_WC_WITH_IMM;
 		wc->byte_len		= wqe->dma.length;
 		wc->qp			= &qp->ibqp;
 	} else {
@@ -404,9 +403,6 @@ static void make_send_cqe(struct rxe_qp *qp, struct rxe_send_wqe *wqe,
 		uwc->wr_id		= wqe->wr.wr_id;
 		uwc->status		= wqe->status;
 		uwc->opcode		= wr_to_wc_opcode(wqe->wr.opcode);
-		if (wqe->wr.opcode == IB_WR_RDMA_WRITE_WITH_IMM ||
-		    wqe->wr.opcode == IB_WR_SEND_WITH_IMM)
-			uwc->wc_flags = IB_WC_WITH_IMM;
 		uwc->byte_len		= wqe->dma.length;
 		uwc->qp_num		= qp->ibqp.qp_num;
 	}
@@ -645,13 +641,12 @@ int rxe_completer(void *arg)
 			}
 
 			/* re reset the timeout counter if
-			 * (1) QP is type RC
-			 * (2) the QP is alive
-			 * (3) there is a packet sent by the requester that
-			 *     might be acked (we still might get spurious
-			 *     timeouts but try to keep them as few as possible)
-			 * (4) the timeout parameter is set
-			 */
+			   (1) QP is type RC
+			   (2) the QP is alive
+			   (3) there is a packet sent by the requester that
+			       might be acked (we still might get spurious
+			       timeouts but try to keep them as few as possible)
+			   (4) the timeout parameter is set */
 			if ((qp_type(qp) == IB_QPT_RC) &&
 			    (qp->req.state == QP_STATE_READY) &&
 			    (psn_compare(qp->req.psn, qp->comp.psn) > 0) &&
@@ -661,13 +656,13 @@ int rxe_completer(void *arg)
 			goto exit;
 
 		case COMPST_ERROR_RETRY:
-			/* we come here if the retry timer fired and we did
-			 * not receive a response packet. try to retry the send
-			 * queue if that makes sense and the limits have not
-			 * been exceeded. remember that some timeouts are
-			 * spurious since we do not reset the timer but kick
-			 * it down the road or let it expire
-			 */
+			/* we come here if the retry timer fired
+			   and we did not receive a response packet
+			   try to retry the send queue if that makes
+			   sense and the limits have not been exceeded
+			   remember that some timeouts are spurious
+			   since we do not reset the timer but kick it
+			   down the road or let it expire */
 
 			/* there is nothing to retry in this case */
 			if (!wqe || (wqe->state == wqe_state_posted))
@@ -678,14 +673,12 @@ int rxe_completer(void *arg)
 					qp->comp.retry_cnt--;
 
 				/* no point in retrying if we have already
-				 * seen the last ack that the requester could
-				 * have caused
-				 */
+				   seen the last ack that the requester
+				   could have caused */
 				if (psn_compare(qp->req.psn,
 						qp->comp.psn) > 0) {
-					/* tell the requester to retry the
-					 * send send queue next time around
-					 */
+					/* tell the requester to retry the send
+					   send queue next time around */
 					qp->req.need_retry = 1;
 					rxe_run_task(&qp->req.task, 1);
 				}
@@ -721,14 +714,13 @@ int rxe_completer(void *arg)
 	}
 
 exit:
-	/* we come here if we are done with processing and want the task to
-	 * exit from the loop calling us
-	 */
+	/* we come here if we are done with processing and want the
+	   task to exit from the loop calling us */
 	return -EAGAIN;
 
 done:
-	/* we come here if we have processed a packet we want the task to call
-	 * us again to see if there is anything else to do
-	 */
+	/* we come here if we have processed a packet
+	   we want the task to call us again to see
+	   if there is anything else to do */
 	return 0;
 }

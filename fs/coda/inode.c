@@ -74,9 +74,9 @@ static void init_once(void *foo)
 int __init coda_init_inodecache(void)
 {
 	coda_inode_cachep = kmem_cache_create("coda_inode_cache",
-				sizeof(struct coda_inode_info), 0,
-				SLAB_RECLAIM_ACCOUNT|SLAB_MEM_SPREAD|
-				SLAB_ACCOUNT, init_once);
+				sizeof(struct coda_inode_info),
+				0, SLAB_RECLAIM_ACCOUNT|SLAB_MEM_SPREAD,
+				init_once);
 	if (coda_inode_cachep == NULL)
 		return -ENOMEM;
 	return 0;
@@ -257,15 +257,15 @@ static void coda_evict_inode(struct inode *inode)
 
 int coda_getattr(struct vfsmount *mnt, struct dentry *dentry, struct kstat *stat)
 {
-	int err = coda_revalidate_inode(d_inode(dentry));
+	int err = coda_revalidate_inode(dentry->d_inode);
 	if (!err)
-		generic_fillattr(d_inode(dentry), stat);
+		generic_fillattr(dentry->d_inode, stat);
 	return err;
 }
 
 int coda_setattr(struct dentry *de, struct iattr *iattr)
 {
-	struct inode *inode = d_inode(de);
+	struct inode *inode = de->d_inode;
 	struct coda_vattr vattr;
 	int error;
 

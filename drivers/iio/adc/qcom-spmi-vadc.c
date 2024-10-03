@@ -18,7 +18,6 @@
 #include <linux/iio/iio.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
-#include <linux/math64.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
@@ -472,11 +471,11 @@ static s32 vadc_calibrate(struct vadc_priv *vadc,
 			  const struct vadc_channel_prop *prop, u16 adc_code)
 {
 	const struct vadc_prescale_ratio *prescale;
-	s64 voltage;
+	s32 voltage;
 
 	voltage = adc_code - vadc->graph[prop->calibration].gnd;
 	voltage *= vadc->graph[prop->calibration].dx;
-	voltage = div64_s64(voltage, vadc->graph[prop->calibration].dy);
+	voltage = voltage / vadc->graph[prop->calibration].dy;
 
 	if (prop->calibration == VADC_CALIB_ABSOLUTE)
 		voltage += vadc->graph[prop->calibration].dx;
@@ -488,7 +487,7 @@ static s32 vadc_calibrate(struct vadc_priv *vadc,
 
 	voltage = voltage * prescale->den;
 
-	return div64_s64(voltage, prescale->num);
+	return voltage / prescale->num;
 }
 
 static int vadc_decimation_from_dt(u32 value)
@@ -839,10 +838,8 @@ static int vadc_get_dt_data(struct vadc_priv *vadc, struct device_node *node)
 
 	for_each_available_child_of_node(node, child) {
 		ret = vadc_get_dt_channel_data(vadc->dev, &prop, child);
-		if (ret) {
-			of_node_put(child);
+		if (ret)
 			return ret;
-		}
 
 		vadc->chan_props[index] = prop;
 

@@ -219,6 +219,10 @@ static inline void nfs_fs_proc_exit(void)
 }
 #endif
 
+#ifdef CONFIG_NFS_V4_1
+int nfs_sockaddr_match_ipaddr(const struct sockaddr *, const struct sockaddr *);
+#endif
+
 /* callback_xdr.c */
 extern struct svc_version nfs4_callback_version1;
 extern struct svc_version nfs4_callback_version4;
@@ -238,7 +242,7 @@ extern void nfs_pgheader_init(struct nfs_pageio_descriptor *desc,
 			      struct nfs_pgio_header *hdr,
 			      void (*release)(struct nfs_pgio_header *hdr));
 void nfs_set_pgio_error(struct nfs_pgio_header *hdr, int error, loff_t pos);
-int nfs_iocounter_wait(struct nfs_lock_context *l_ctx);
+int nfs_iocounter_wait(struct nfs_io_counter *c);
 
 extern const struct nfs_pageio_ops nfs_pgio_rw_ops;
 struct nfs_pgio_header *nfs_pgio_header_alloc(const struct nfs_rw_ops *);
@@ -252,16 +256,16 @@ void nfs_free_request(struct nfs_page *req);
 struct nfs_pgio_mirror *
 nfs_pgio_current_mirror(struct nfs_pageio_descriptor *desc);
 
+static inline void nfs_iocounter_init(struct nfs_io_counter *c)
+{
+	c->flags = 0;
+	atomic_set(&c->io_count, 0);
+}
+
 static inline bool nfs_pgio_has_mirroring(struct nfs_pageio_descriptor *desc)
 {
 	WARN_ON_ONCE(desc->pg_mirror_count < 1);
 	return desc->pg_mirror_count > 1;
-}
-
-static inline bool nfs_match_open_context(const struct nfs_open_context *ctx1,
-		const struct nfs_open_context *ctx2)
-{
-	return ctx1->cred == ctx2->cred && ctx1->state == ctx2->state;
 }
 
 /* nfs2xdr.c */
@@ -292,22 +296,6 @@ extern struct rpc_procinfo nfs4_procedures[];
 
 #ifdef CONFIG_NFS_V4_SECURITY_LABEL
 extern struct nfs4_label *nfs4_label_alloc(struct nfs_server *server, gfp_t flags);
-static inline struct nfs4_label *
-nfs4_label_copy(struct nfs4_label *dst, struct nfs4_label *src)
-{
-	if (!dst || !src)
-		return NULL;
-
-	if (src->len > NFS4_MAXLABELLEN)
-		return NULL;
-
-	dst->lfs = src->lfs;
-	dst->pi = src->pi;
-	dst->len = src->len;
-	memcpy(dst->label, src->label, src->len);
-
-	return dst;
-}
 static inline void nfs4_label_free(struct nfs4_label *label)
 {
 	if (label) {
@@ -327,11 +315,6 @@ static inline struct nfs4_label *nfs4_label_alloc(struct nfs_server *server, gfp
 static inline void nfs4_label_free(void *label) {}
 static inline void nfs_zap_label_cache_locked(struct nfs_inode *nfsi)
 {
-}
-static inline struct nfs4_label *
-nfs4_label_copy(struct nfs4_label *dst, struct nfs4_label *src)
-{
-	return NULL;
 }
 #endif /* CONFIG_NFS_V4_SECURITY_LABEL */
 
@@ -358,8 +341,9 @@ int nfs_mknod(struct inode *, struct dentry *, umode_t, dev_t);
 int nfs_rename(struct inode *, struct dentry *, struct inode *, struct dentry *);
 
 /* file.c */
-int nfs_file_fsync(struct file *file, loff_t start, loff_t end, int datasync);
+int nfs_file_fsync_commit(struct file *, loff_t, loff_t, int);
 loff_t nfs_file_llseek(struct file *, loff_t, int);
+int nfs_file_flush(struct file *, fl_owner_t);
 ssize_t nfs_file_read(struct kiocb *, struct iov_iter *);
 ssize_t nfs_file_splice_read(struct file *, loff_t *, struct pipe_inode_info *,
 			     size_t, unsigned int);
@@ -379,8 +363,7 @@ extern int nfs_drop_inode(struct inode *);
 extern void nfs_clear_inode(struct inode *);
 extern void nfs_evict_inode(struct inode *);
 void nfs_zap_acl_cache(struct inode *inode);
-extern int nfs_wait_bit_killable(struct wait_bit_key *key, int mode);
-extern int nfs_wait_atomic_killable(atomic_t *p);
+extern int nfs_wait_bit_killable(struct wait_bit_key *key);
 
 /* super.c */
 extern const struct super_operations nfs_sops;
@@ -477,7 +460,6 @@ void nfs_mark_request_commit(struct nfs_page *req,
 			     u32 ds_commit_idx);
 int nfs_write_need_commit(struct nfs_pgio_header *);
 void nfs_writeback_update_inode(struct nfs_pgio_header *hdr);
-int nfs_commit_file(struct file *file, struct nfs_write_verifier *verf);
 int nfs_generic_commit_list(struct inode *inode, struct list_head *head,
 			    int how, struct nfs_commit_info *cinfo);
 void nfs_retry_commit(struct list_head *page_list,
@@ -485,11 +467,8 @@ void nfs_retry_commit(struct list_head *page_list,
 		      struct nfs_commit_info *cinfo,
 		      u32 ds_commit_idx);
 void nfs_commitdata_release(struct nfs_commit_data *data);
-void nfs_request_add_commit_list(struct nfs_page *req,
+void nfs_request_add_commit_list(struct nfs_page *req, struct list_head *dst,
 				 struct nfs_commit_info *cinfo);
-void nfs_request_add_commit_list_locked(struct nfs_page *req,
-		struct list_head *dst,
-		struct nfs_commit_info *cinfo);
 void nfs_request_remove_commit_list(struct nfs_page *req,
 				    struct nfs_commit_info *cinfo);
 void nfs_init_cinfo(struct nfs_commit_info *cinfo,
@@ -516,7 +495,12 @@ extern int nfs_sillyrename(struct inode *dir, struct dentry *dentry);
 /* direct.c */
 void nfs_init_cinfo_from_dreq(struct nfs_commit_info *cinfo,
 			      struct nfs_direct_req *dreq);
+static inline void nfs_inode_dio_wait(struct inode *inode)
+{
+	inode_dio_wait(inode);
+}
 extern ssize_t nfs_dreq_bytes_left(struct nfs_direct_req *dreq);
+extern void nfs_direct_set_resched_writes(struct nfs_direct_req *dreq);
 
 /* nfs4proc.c */
 extern void __nfs4_read_done_cb(struct nfs_pgio_header *);
@@ -618,15 +602,13 @@ void nfs_super_set_maxbytes(struct super_block *sb, __u64 maxfilesize)
  * Record the page as unstable and mark its inode as dirty.
  */
 static inline
-void nfs_mark_page_unstable(struct page *page, struct nfs_commit_info *cinfo)
+void nfs_mark_page_unstable(struct page *page)
 {
-	if (!cinfo->dreq) {
-		struct inode *inode = page_file_mapping(page)->host;
+	struct inode *inode = page_file_mapping(page)->host;
 
-		inc_zone_page_state(page, NR_UNSTABLE_NFS);
-		inc_wb_stat(&inode_to_bdi(inode)->wb, WB_RECLAIMABLE);
-		__mark_inode_dirty(inode, I_DIRTY_DATASYNC);
-	}
+	inc_zone_page_state(page, NR_UNSTABLE_NFS);
+	inc_bdi_stat(inode_to_bdi(inode), BDI_RECLAIMABLE);
+	 __mark_inode_dirty(inode, I_DIRTY_DATASYNC);
 }
 
 /*
@@ -639,11 +621,11 @@ unsigned int nfs_page_length(struct page *page)
 
 	if (i_size > 0) {
 		pgoff_t page_index = page_file_index(page);
-		pgoff_t end_index = (i_size - 1) >> PAGE_SHIFT;
+		pgoff_t end_index = (i_size - 1) >> PAGE_CACHE_SHIFT;
 		if (page_index < end_index)
-			return PAGE_SIZE;
+			return PAGE_CACHE_SIZE;
 		if (page_index == end_index)
-			return ((i_size - 1) & ~PAGE_MASK) + 1;
+			return ((i_size - 1) & ~PAGE_CACHE_MASK) + 1;
 	}
 	return 0;
 }
@@ -693,32 +675,9 @@ static inline u32 nfs_fhandle_hash(const struct nfs_fh *fh)
 {
 	return ~crc32_le(0xFFFFFFFF, &fh->data[0], fh->size);
 }
-static inline u32 nfs_stateid_hash(const nfs4_stateid *stateid)
-{
-	return ~crc32_le(0xFFFFFFFF, &stateid->other[0],
-				NFS4_STATEID_OTHER_SIZE);
-}
 #else
 static inline u32 nfs_fhandle_hash(const struct nfs_fh *fh)
 {
 	return 0;
 }
-static inline u32 nfs_stateid_hash(nfs4_stateid *stateid)
-{
-	return 0;
-}
 #endif
-
-static inline bool nfs_error_is_fatal(int err)
-{
-	switch (err) {
-	case -ERESTARTSYS:
-	case -EIO:
-	case -ENOSPC:
-	case -EROFS:
-	case -E2BIG:
-		return true;
-	default:
-		return false;
-	}
-}

@@ -17,9 +17,7 @@
 #ifndef _LINUX_RHASHTABLE_H
 #define _LINUX_RHASHTABLE_H
 
-#include <linux/atomic.h>
 #include <linux/compiler.h>
-#include <linux/err.h>
 #include <linux/errno.h>
 #include <linux/jhash.h>
 #include <linux/list_nulls.h>
@@ -102,7 +100,6 @@ struct rhashtable;
  * @key_len: Length of key
  * @key_offset: Offset of key in struct to be hashed
  * @head_offset: Offset of rhash_head in struct to be hashed
- * @insecure_max_entries: Maximum number of entries (may be exceeded)
  * @max_size: Maximum size while expanding
  * @min_size: Minimum size while shrinking
  * @nulls_base: Base value to generate nulls marker
@@ -118,7 +115,6 @@ struct rhashtable_params {
 	size_t			key_len;
 	size_t			key_offset;
 	size_t			head_offset;
-	unsigned int		insecure_max_entries;
 	unsigned int		max_size;
 	unsigned int		min_size;
 	u32			nulls_base;
@@ -286,20 +282,7 @@ static inline bool rht_shrink_below_30(const struct rhashtable *ht,
 static inline bool rht_grow_above_100(const struct rhashtable *ht,
 				      const struct bucket_table *tbl)
 {
-	return atomic_read(&ht->nelems) > tbl->size &&
-		(!ht->p.max_size || tbl->size < ht->p.max_size);
-}
-
-/**
- * rht_grow_above_max - returns true if table is above maximum
- * @ht:		hash table
- * @tbl:	current table
- */
-static inline bool rht_grow_above_max(const struct rhashtable *ht,
-				      const struct bucket_table *tbl)
-{
-	return ht->p.insecure_max_entries &&
-	       atomic_read(&ht->nelems) >= ht->p.insecure_max_entries;
+	return atomic_read(&ht->nelems) > tbl->size;
 }
 
 /* The bucket lock is selected based on the hash and protects mutations
@@ -340,14 +323,12 @@ static inline int lockdep_rht_bucket_is_held(const struct bucket_table *tbl,
 int rhashtable_init(struct rhashtable *ht,
 		    const struct rhashtable_params *params);
 
-struct bucket_table *rhashtable_insert_slow(struct rhashtable *ht,
-					    const void *key,
-					    struct rhash_head *obj,
-					    struct bucket_table *old_tbl);
-int rhashtable_insert_rehash(struct rhashtable *ht, struct bucket_table *tbl);
+int rhashtable_insert_slow(struct rhashtable *ht, const void *key,
+			   struct rhash_head *obj,
+			   struct bucket_table *old_tbl);
+int rhashtable_insert_rehash(struct rhashtable *ht);
 
-int rhashtable_walk_init(struct rhashtable *ht, struct rhashtable_iter *iter,
-			 gfp_t gfp);
+int rhashtable_walk_init(struct rhashtable *ht, struct rhashtable_iter *iter);
 void rhashtable_walk_exit(struct rhashtable_iter *iter);
 int rhashtable_walk_start(struct rhashtable_iter *iter) __acquires(RCU);
 void *rhashtable_walk_next(struct rhashtable_iter *iter);
@@ -601,22 +582,16 @@ restart:
 
 	new_tbl = rht_dereference_rcu(tbl->future_tbl, ht);
 	if (unlikely(new_tbl)) {
-		tbl = rhashtable_insert_slow(ht, key, obj, new_tbl);
-		if (!IS_ERR_OR_NULL(tbl))
+		err = rhashtable_insert_slow(ht, key, obj, new_tbl);
+		if (err == -EAGAIN)
 			goto slow_path;
-
-		err = PTR_ERR(tbl);
 		goto out;
 	}
-
-	err = -E2BIG;
-	if (unlikely(rht_grow_above_max(ht, tbl)))
-		goto out;
 
 	if (unlikely(rht_grow_above_100(ht, tbl))) {
 slow_path:
 		spin_unlock_bh(lock);
-		err = rhashtable_insert_rehash(ht, tbl);
+		err = rhashtable_insert_rehash(ht);
 		rcu_read_unlock();
 		if (err)
 			return err;
@@ -819,88 +794,6 @@ static inline int rhashtable_remove_fast(
 		schedule_work(&ht->run_work);
 
 out:
-	rcu_read_unlock();
-
-	return err;
-}
-
-/* Internal function, please use rhashtable_replace_fast() instead */
-static inline int __rhashtable_replace_fast(
-	struct rhashtable *ht, struct bucket_table *tbl,
-	struct rhash_head *obj_old, struct rhash_head *obj_new,
-	const struct rhashtable_params params)
-{
-	struct rhash_head __rcu **pprev;
-	struct rhash_head *he;
-	spinlock_t *lock;
-	unsigned int hash;
-	int err = -ENOENT;
-
-	/* Minimally, the old and new objects must have same hash
-	 * (which should mean identifiers are the same).
-	 */
-	hash = rht_head_hashfn(ht, tbl, obj_old, params);
-	if (hash != rht_head_hashfn(ht, tbl, obj_new, params))
-		return -EINVAL;
-
-	lock = rht_bucket_lock(tbl, hash);
-
-	spin_lock_bh(lock);
-
-	pprev = &tbl->buckets[hash];
-	rht_for_each(he, tbl, hash) {
-		if (he != obj_old) {
-			pprev = &he->next;
-			continue;
-		}
-
-		rcu_assign_pointer(obj_new->next, obj_old->next);
-		rcu_assign_pointer(*pprev, obj_new);
-		err = 0;
-		break;
-	}
-
-	spin_unlock_bh(lock);
-
-	return err;
-}
-
-/**
- * rhashtable_replace_fast - replace an object in hash table
- * @ht:		hash table
- * @obj_old:	pointer to hash head inside object being replaced
- * @obj_new:	pointer to hash head inside object which is new
- * @params:	hash table parameters
- *
- * Replacing an object doesn't affect the number of elements in the hash table
- * or bucket, so we don't need to worry about shrinking or expanding the
- * table here.
- *
- * Returns zero on success, -ENOENT if the entry could not be found,
- * -EINVAL if hash is not the same for the old and new objects.
- */
-static inline int rhashtable_replace_fast(
-	struct rhashtable *ht, struct rhash_head *obj_old,
-	struct rhash_head *obj_new,
-	const struct rhashtable_params params)
-{
-	struct bucket_table *tbl;
-	int err;
-
-	rcu_read_lock();
-
-	tbl = rht_dereference_rcu(ht->tbl, ht);
-
-	/* Because we have already taken (and released) the bucket
-	 * lock in old_tbl, if we find that future_tbl is not yet
-	 * visible then that guarantees the entry to still be in
-	 * the old tbl if it exists.
-	 */
-	while ((err = __rhashtable_replace_fast(ht, tbl, obj_old,
-						obj_new, params)) &&
-	       (tbl = rht_dereference_rcu(tbl->future_tbl, ht)))
-		;
-
 	rcu_read_unlock();
 
 	return err;

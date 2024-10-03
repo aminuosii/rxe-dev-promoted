@@ -41,7 +41,6 @@
 #define ETP_I2C_MAX_X_AXIS_CMD		0x0106
 #define ETP_I2C_MAX_Y_AXIS_CMD		0x0107
 #define ETP_I2C_RESOLUTION_CMD		0x0108
-#define ETP_I2C_PRESSURE_CMD		0x010A
 #define ETP_I2C_IAP_VERSION_CMD		0x0110
 #define ETP_I2C_SET_CMD			0x0300
 #define ETP_I2C_POWER_CMD		0x0307
@@ -259,8 +258,7 @@ static int elan_i2c_get_version(struct i2c_client *client,
 	return 0;
 }
 
-static int elan_i2c_get_sm_version(struct i2c_client *client,
-				   u8 *ic_type, u8 *version)
+static int elan_i2c_get_sm_version(struct i2c_client *client, u8 *version)
 {
 	int error;
 	u8 val[3];
@@ -272,11 +270,10 @@ static int elan_i2c_get_sm_version(struct i2c_client *client,
 	}
 
 	*version = val[0];
-	*ic_type = val[1];
 	return 0;
 }
 
-static int elan_i2c_get_product_id(struct i2c_client *client, u16 *id)
+static int elan_i2c_get_product_id(struct i2c_client *client, u8 *id)
 {
 	int error;
 	u8 val[3];
@@ -287,7 +284,7 @@ static int elan_i2c_get_product_id(struct i2c_client *client, u16 *id)
 		return error;
 	}
 
-	*id = le16_to_cpup((__le16 *)val);
+	*id = val[0];
 	return 0;
 }
 
@@ -367,29 +364,8 @@ static int elan_i2c_get_num_traces(struct i2c_client *client,
 		return error;
 	}
 
-	*x_traces = val[0];
-	*y_traces = val[1];
-
-	return 0;
-}
-
-static int elan_i2c_get_pressure_adjustment(struct i2c_client *client,
-					    int *adjustment)
-{
-	int error;
-	u8 val[3];
-
-	error = elan_i2c_read_cmd(client, ETP_I2C_PRESSURE_CMD, val);
-	if (error) {
-		dev_err(&client->dev, "failed to get pressure format: %d\n",
-			error);
-		return error;
-	}
-
-	if ((val[0] >> 4) & 0x1)
-		*adjustment = 0;
-	else
-		*adjustment = ETP_PRESSURE_OFFSET;
+	*x_traces = val[0] - 1;
+	*y_traces = val[1] - 1;
 
 	return 0;
 }
@@ -626,7 +602,6 @@ const struct elan_transport_ops elan_i2c_ops = {
 	.get_sm_version		= elan_i2c_get_sm_version,
 	.get_product_id		= elan_i2c_get_product_id,
 	.get_checksum		= elan_i2c_get_checksum,
-	.get_pressure_adjustment = elan_i2c_get_pressure_adjustment,
 
 	.get_max		= elan_i2c_get_max,
 	.get_resolution		= elan_i2c_get_resolution,

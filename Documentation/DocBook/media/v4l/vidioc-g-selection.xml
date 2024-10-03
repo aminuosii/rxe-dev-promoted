@@ -50,12 +50,18 @@
   <refsect1>
     <title>Description</title>
 
+    <note>
+      <title>Experimental</title>
+      <para>This is an <link linkend="experimental"> experimental </link>
+      interface and may change in the future.</para>
+    </note>
+
     <para>The ioctls are used to query and configure selection rectangles.</para>
 
 <para>To query the cropping (composing) rectangle set &v4l2-selection;
 <structfield> type </structfield> field to the respective buffer type.
-Do not use the multiplanar buffer types.  Use <constant>V4L2_BUF_TYPE_VIDEO_CAPTURE</constant>
-instead of <constant>V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE</constant> and use
+Do not use multiplanar buffers.  Use <constant>V4L2_BUF_TYPE_VIDEO_CAPTURE</constant>
+instead of <constant>V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE</constant>.  Use
 <constant>V4L2_BUF_TYPE_VIDEO_OUTPUT</constant> instead of
 <constant>V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE</constant>.  The next step is
 setting the value of &v4l2-selection; <structfield>target</structfield> field
@@ -193,7 +199,7 @@ exist no rectangle</emphasis> that satisfies the constraints.</para>
 	  <row>
 	    <entry>__u32</entry>
 	    <entry><structfield>reserved[9]</structfield></entry>
-	    <entry>Reserved fields for future use. Drivers and applications must zero this array.</entry>
+	    <entry>Reserved fields for future use.</entry>
 	  </row>
 	</tbody>
       </tgroup>
@@ -216,7 +222,7 @@ or the <structfield>flags</structfield> argument is not valid.</para>
 	<term><errorcode>ERANGE</errorcode></term>
 	<listitem>
 	  <para>It is not possible to adjust &v4l2-rect; <structfield>
-r</structfield> rectangle to satisfy all constraints given in the
+r</structfield> rectangle to satisfy all contraints given in the
 <structfield>flags</structfield> argument.</para>
 	</listitem>
       </varlistentry>

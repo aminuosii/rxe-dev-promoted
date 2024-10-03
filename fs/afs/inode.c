@@ -56,7 +56,6 @@ static int afs_inode_map_status(struct afs_vnode *vnode, struct key *key)
 	case AFS_FTYPE_SYMLINK:
 		inode->i_mode	= S_IFLNK | vnode->status.mode;
 		inode->i_op	= &page_symlink_inode_operations;
-		inode_nohighmem(inode);
 		break;
 	default:
 		printk("kAFS: AFS vnode with undefined type\n");
@@ -380,7 +379,7 @@ int afs_getattr(struct vfsmount *mnt, struct dentry *dentry,
 {
 	struct inode *inode;
 
-	inode = d_inode(dentry);
+	inode = dentry->d_inode;
 
 	_enter("{ ino=%lu v=%u }", inode->i_ino, inode->i_generation);
 
@@ -459,7 +458,7 @@ void afs_evict_inode(struct inode *inode)
  */
 int afs_setattr(struct dentry *dentry, struct iattr *attr)
 {
-	struct afs_vnode *vnode = AFS_FS_I(d_inode(dentry));
+	struct afs_vnode *vnode = AFS_FS_I(dentry->d_inode);
 	struct key *key;
 	int ret;
 

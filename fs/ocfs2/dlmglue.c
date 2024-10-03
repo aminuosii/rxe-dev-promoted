@@ -54,7 +54,6 @@
 #include "uptodate.h"
 #include "quota.h"
 #include "refcounttree.h"
-#include "acl.h"
 
 #include "buffer_head_io.h"
 
@@ -1391,7 +1390,6 @@ static int __ocfs2_cluster_lock(struct ocfs2_super *osb,
 	unsigned int gen;
 	int noqueue_attempted = 0;
 	int dlm_locked = 0;
-	int kick_dc = 0;
 
 	if (!(lockres->l_flags & OCFS2_LOCK_INITIALIZED)) {
 		mlog_errno(-EINVAL);
@@ -1526,12 +1524,7 @@ update_holders:
 unlock:
 	lockres_clear_flags(lockres, OCFS2_LOCK_UPCONVERT_FINISHING);
 
-	/* ocfs2_unblock_lock reques on seeing OCFS2_LOCK_UPCONVERT_FINISHING */
-	kick_dc = (lockres->l_flags & OCFS2_LOCK_BLOCKED);
-
 	spin_unlock_irqrestore(&lockres->l_lock, flags);
-	if (kick_dc)
-		ocfs2_wake_downconvert_thread(osb);
 out:
 	/*
 	 * This is helping work around a lock inversion between the page lock
@@ -2439,6 +2432,12 @@ bail:
  * done this we have to return AOP_TRUNCATED_PAGE so the aop method
  * that called us can bubble that back up into the VFS who will then
  * immediately retry the aop call.
+ *
+ * We do a blocking lock and immediate unlock before returning, though, so that
+ * the lock has a great chance of being cached on this node by the time the VFS
+ * calls back to retry the aop.    This has a potential to livelock as nodes
+ * ping locks back and forth, but that's a risk we're willing to take to avoid
+ * the lock inversion simply.
  */
 int ocfs2_inode_lock_with_page(struct inode *inode,
 			      struct buffer_head **ret_bh,
@@ -2450,6 +2449,8 @@ int ocfs2_inode_lock_with_page(struct inode *inode,
 	ret = ocfs2_inode_lock_full(inode, ret_bh, ex, OCFS2_LOCK_NONBLOCK);
 	if (ret == -EAGAIN) {
 		unlock_page(page);
+		if (ocfs2_inode_lock(inode, ret_bh, ex) == 0)
+			ocfs2_inode_unlock(inode, ex);
 		ret = AOP_TRUNCATED_PAGE;
 	}
 
@@ -2958,7 +2959,7 @@ static int ocfs2_dlm_init_debug(struct ocfs2_super *osb)
 							 osb->osb_debug_root,
 							 osb,
 							 &ocfs2_dlm_debug_fops);
-	if (!dlm_debug->d_locking_state) {
+	if (IS_ERR_OR_NULL(dlm_debug->d_locking_state)) {
 		ret = -EINVAL;
 		mlog(ML_ERROR,
 		     "Unable to create locking state debugfs file.\n");
@@ -2997,8 +2998,7 @@ int ocfs2_dlm_init(struct ocfs2_super *osb)
 	}
 
 	/* launch downconvert thread */
-	osb->dc_task = kthread_run(ocfs2_downconvert_thread, osb, "ocfs2dc-%s",
-			osb->uuid_str);
+	osb->dc_task = kthread_run(ocfs2_downconvert_thread, osb, "ocfs2dc");
 	if (IS_ERR(osb->dc_task)) {
 		status = PTR_ERR(osb->dc_task);
 		osb->dc_task = NULL;
@@ -3035,6 +3035,8 @@ local:
 	ocfs2_orphan_scan_lock_res_init(&osb->osb_orphan_scan.os_lockres, osb);
 
 	osb->cconn = conn;
+
+	status = 0;
 bail:
 	if (status < 0) {
 		ocfs2_dlm_shutdown_debug(osb);
@@ -3624,8 +3626,6 @@ static int ocfs2_data_convert_worker(struct ocfs2_lock_res *lockres,
 		filemap_fdatawait(mapping);
 	}
 
-	forget_all_cached_acls(inode);
-
 out:
 	return UNBLOCK_CONTINUE;
 }
@@ -4025,13 +4025,9 @@ static void ocfs2_downconvert_thread_do_work(struct ocfs2_super *osb)
 	osb->dc_work_sequence = osb->dc_wake_sequence;
 
 	processed = osb->blocked_lock_count;
-	/*
-	 * blocked lock processing in this loop might call iput which can
-	 * remove items off osb->blocked_lock_list. Downconvert up to
-	 * 'processed' number of locks, but stop short if we had some
-	 * removed in ocfs2_mark_lockres_freeing when downconverting.
-	 */
-	while (processed && !list_empty(&osb->blocked_lock_list)) {
+	while (processed) {
+		BUG_ON(list_empty(&osb->blocked_lock_list));
+
 		lockres = list_entry(osb->blocked_lock_list.next,
 				     struct ocfs2_lock_res, l_blocked_list);
 		list_del_init(&lockres->l_blocked_list);

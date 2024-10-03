@@ -13,16 +13,20 @@
 
 #include <linux/phy.h>
 #include <linux/netdevice.h>
-#include <linux/netpoll.h>
 
 struct dsa_device_ops {
-	struct sk_buff *(*xmit)(struct sk_buff *skb, struct net_device *dev);
+	netdev_tx_t (*xmit)(struct sk_buff *skb, struct net_device *dev);
 	int (*rcv)(struct sk_buff *skb, struct net_device *dev,
 		   struct packet_type *pt, struct net_device *orig_dev);
 };
 
 struct dsa_slave_priv {
-	struct sk_buff *	(*xmit)(struct sk_buff *skb,
+	/*
+	 * The linux network interface corresponding to this
+	 * switch port.
+	 */
+	struct net_device	*dev;
+	netdev_tx_t		(*xmit)(struct sk_buff *skb,
 					struct net_device *dev);
 
 	/*
@@ -43,9 +47,6 @@ struct dsa_slave_priv {
 	int			old_duplex;
 
 	struct net_device	*bridge_dev;
-#ifdef CONFIG_NET_POLL_CONTROLLER
-	struct netpoll		*netpoll;
-#endif
 };
 
 /* dsa.c */
@@ -56,7 +57,6 @@ extern const struct dsa_device_ops notag_netdev_ops;
 void dsa_slave_mii_bus_init(struct dsa_switch *ds);
 int dsa_slave_create(struct dsa_switch *ds, struct device *parent,
 		     int port, char *name);
-void dsa_slave_destroy(struct net_device *slave_dev);
 int dsa_slave_suspend(struct net_device *slave_dev);
 int dsa_slave_resume(struct net_device *slave_dev);
 int dsa_slave_netdevice_event(struct notifier_block *unused,

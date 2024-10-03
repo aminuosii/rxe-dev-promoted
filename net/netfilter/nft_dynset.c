@@ -50,9 +50,8 @@ static void *nft_dynset_new(struct nft_set *set, const struct nft_expr *expr,
 	}
 
 	ext = nft_set_elem_ext(set, elem);
-	if (priv->expr != NULL &&
-	    nft_expr_clone(nft_set_ext_expr(ext), priv->expr) < 0)
-		return NULL;
+	if (priv->expr != NULL)
+		nft_expr_clone(nft_set_ext_expr(ext), priv->expr);
 
 	return elem;
 }
@@ -227,8 +226,7 @@ static int nft_dynset_dump(struct sk_buff *skb, const struct nft_expr *expr)
 		goto nla_put_failure;
 	if (nla_put_string(skb, NFTA_DYNSET_SET_NAME, priv->set->name))
 		goto nla_put_failure;
-	if (nla_put_be64(skb, NFTA_DYNSET_TIMEOUT, cpu_to_be64(priv->timeout),
-			 NFTA_DYNSET_PAD))
+	if (nla_put_be64(skb, NFTA_DYNSET_TIMEOUT, cpu_to_be64(priv->timeout)))
 		goto nla_put_failure;
 	if (priv->expr && nft_expr_dump(skb, NFTA_DYNSET_EXPR, priv->expr))
 		goto nla_put_failure;

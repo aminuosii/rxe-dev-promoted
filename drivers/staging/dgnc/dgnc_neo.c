@@ -13,6 +13,7 @@
  * PURPOSE.  See the GNU General Public License for more details.
  */
 
+
 #include <linux/kernel.h>
 #include <linux/sched.h>	/* For jiffies, task states */
 #include <linux/interrupt.h>    /* For tasklet and interrupt structs/defines */
@@ -56,6 +57,7 @@ static uint neo_get_uart_bytes_left(struct channel_t *ch);
 static void neo_send_immediate_char(struct channel_t *ch, unsigned char c);
 static irqreturn_t neo_intr(int irq, void *voidbrd);
 
+
 struct board_ops dgnc_neo_ops = {
 	.tasklet =			neo_tasklet,
 	.intr =				neo_intr,
@@ -77,6 +79,9 @@ struct board_ops dgnc_neo_ops = {
 	.send_immediate_char =		neo_send_immediate_char
 };
 
+static uint dgnc_offset_table[8] = { 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80 };
+
+
 /*
  * This function allows calls to ensure that all outstanding
  * PCI writes have been completed, by doing a PCI read against
@@ -94,6 +99,7 @@ static inline void neo_set_cts_flow_control(struct channel_t *ch)
 {
 	unsigned char ier = readb(&ch->ch_neo_uart->ier);
 	unsigned char efr = readb(&ch->ch_neo_uart->efr);
+
 
 	/* Turn on auto CTS flow control */
 #if 1
@@ -114,8 +120,7 @@ static inline void neo_set_cts_flow_control(struct channel_t *ch)
 	writeb(efr, &ch->ch_neo_uart->efr);
 
 	/* Turn on table D, with 8 char hi/low watermarks */
-	writeb(UART_17158_FCTR_TRGD | UART_17158_FCTR_RTS_4DELAY,
-	       &ch->ch_neo_uart->fctr);
+	writeb((UART_17158_FCTR_TRGD | UART_17158_FCTR_RTS_4DELAY), &ch->ch_neo_uart->fctr);
 
 	/* Feed the UART our trigger levels */
 	writeb(8, &ch->ch_neo_uart->tfifo);
@@ -125,6 +130,7 @@ static inline void neo_set_cts_flow_control(struct channel_t *ch)
 
 	neo_pci_posting_flush(ch->ch_bd);
 }
+
 
 static inline void neo_set_rts_flow_control(struct channel_t *ch)
 {
@@ -149,8 +155,7 @@ static inline void neo_set_rts_flow_control(struct channel_t *ch)
 	/* Turn on UART enhanced bits */
 	writeb(efr, &ch->ch_neo_uart->efr);
 
-	writeb(UART_17158_FCTR_TRGD | UART_17158_FCTR_RTS_4DELAY,
-	       &ch->ch_neo_uart->fctr);
+	writeb((UART_17158_FCTR_TRGD | UART_17158_FCTR_RTS_4DELAY), &ch->ch_neo_uart->fctr);
 	ch->ch_r_watermark = 4;
 
 	writeb(32, &ch->ch_neo_uart->rfifo);
@@ -168,6 +173,7 @@ static inline void neo_set_rts_flow_control(struct channel_t *ch)
 
 	neo_pci_posting_flush(ch->ch_bd);
 }
+
 
 static inline void neo_set_ixon_flow_control(struct channel_t *ch)
 {
@@ -187,8 +193,7 @@ static inline void neo_set_ixon_flow_control(struct channel_t *ch)
 	/* Turn on UART enhanced bits */
 	writeb(efr, &ch->ch_neo_uart->efr);
 
-	writeb(UART_17158_FCTR_TRGD | UART_17158_FCTR_RTS_8DELAY,
-	       &ch->ch_neo_uart->fctr);
+	writeb((UART_17158_FCTR_TRGD | UART_17158_FCTR_RTS_8DELAY), &ch->ch_neo_uart->fctr);
 	ch->ch_r_watermark = 4;
 
 	writeb(32, &ch->ch_neo_uart->rfifo);
@@ -205,6 +210,7 @@ static inline void neo_set_ixon_flow_control(struct channel_t *ch)
 
 	neo_pci_posting_flush(ch->ch_bd);
 }
+
 
 static inline void neo_set_ixoff_flow_control(struct channel_t *ch)
 {
@@ -226,8 +232,7 @@ static inline void neo_set_ixoff_flow_control(struct channel_t *ch)
 	writeb(efr, &ch->ch_neo_uart->efr);
 
 	/* Turn on table D, with 8 char hi/low watermarks */
-	writeb(UART_17158_FCTR_TRGD | UART_17158_FCTR_RTS_8DELAY,
-	       &ch->ch_neo_uart->fctr);
+	writeb((UART_17158_FCTR_TRGD | UART_17158_FCTR_RTS_8DELAY), &ch->ch_neo_uart->fctr);
 
 	writeb(8, &ch->ch_neo_uart->tfifo);
 	ch->ch_t_tlevel = 8;
@@ -243,6 +248,7 @@ static inline void neo_set_ixoff_flow_control(struct channel_t *ch)
 
 	neo_pci_posting_flush(ch->ch_bd);
 }
+
 
 static inline void neo_set_no_input_flow_control(struct channel_t *ch)
 {
@@ -260,6 +266,7 @@ static inline void neo_set_no_input_flow_control(struct channel_t *ch)
 	else
 		efr &= ~(UART_17158_EFR_ECB | UART_17158_EFR_IXOFF);
 
+
 	/* Why? Becuz Exar's spec says we have to zero it out before setting it */
 	writeb(0, &ch->ch_neo_uart->efr);
 
@@ -267,8 +274,7 @@ static inline void neo_set_no_input_flow_control(struct channel_t *ch)
 	writeb(efr, &ch->ch_neo_uart->efr);
 
 	/* Turn on table D, with 8 char hi/low watermarks */
-	writeb(UART_17158_FCTR_TRGD | UART_17158_FCTR_RTS_8DELAY,
-	       &ch->ch_neo_uart->fctr);
+	writeb((UART_17158_FCTR_TRGD | UART_17158_FCTR_RTS_8DELAY), &ch->ch_neo_uart->fctr);
 
 	ch->ch_r_watermark = 0;
 
@@ -282,6 +288,7 @@ static inline void neo_set_no_input_flow_control(struct channel_t *ch)
 
 	neo_pci_posting_flush(ch->ch_bd);
 }
+
 
 static inline void neo_set_no_output_flow_control(struct channel_t *ch)
 {
@@ -305,8 +312,7 @@ static inline void neo_set_no_output_flow_control(struct channel_t *ch)
 	writeb(efr, &ch->ch_neo_uart->efr);
 
 	/* Turn on table D, with 8 char hi/low watermarks */
-	writeb(UART_17158_FCTR_TRGD | UART_17158_FCTR_RTS_8DELAY,
-	       &ch->ch_neo_uart->fctr);
+	writeb((UART_17158_FCTR_TRGD | UART_17158_FCTR_RTS_8DELAY), &ch->ch_neo_uart->fctr);
 
 	ch->ch_r_watermark = 0;
 
@@ -321,12 +327,13 @@ static inline void neo_set_no_output_flow_control(struct channel_t *ch)
 	neo_pci_posting_flush(ch->ch_bd);
 }
 
+
 /* change UARTs start/stop chars */
 static inline void neo_set_new_start_stop_chars(struct channel_t *ch)
 {
+
 	/* if hardware flow control is set, then skip this whole thing */
-	if (ch->ch_digi.digi_flags & (CTSPACE | RTSPACE) ||
-	    ch->ch_c_cflag & CRTSCTS)
+	if (ch->ch_digi.digi_flags & (CTSPACE | RTSPACE) || ch->ch_c_cflag & CRTSCTS)
 		return;
 
 	/* Tell UART what start/stop chars it should be looking for */
@@ -338,6 +345,7 @@ static inline void neo_set_new_start_stop_chars(struct channel_t *ch)
 
 	neo_pci_posting_flush(ch->ch_bd);
 }
+
 
 /*
  * No locks are assumed to be held when calling this function.
@@ -356,8 +364,8 @@ static inline void neo_clear_break(struct channel_t *ch, int force)
 
 	/* Turn break off, and unset some variables */
 	if (ch->ch_flags & CH_BREAK_SENDING) {
-		if (force ||
-		    time_after_eq(jiffies, ch->ch_stop_sending_break)) {
+		if (time_after_eq(jiffies, ch->ch_stop_sending_break)
+		    || force) {
 			unsigned char temp = readb(&ch->ch_neo_uart->lcr);
 
 			writeb((temp & ~UART_LCR_SBC), &ch->ch_neo_uart->lcr);
@@ -369,6 +377,7 @@ static inline void neo_clear_break(struct channel_t *ch, int force)
 	spin_unlock_irqrestore(&ch->ch_lock, flags);
 }
 
+
 /*
  * Parse the ISR register.
  */
@@ -379,12 +388,19 @@ static inline void neo_parse_isr(struct dgnc_board *brd, uint port)
 	unsigned char cause;
 	unsigned long flags;
 
+	if (!brd || brd->magic != DGNC_BOARD_MAGIC)
+		return;
+
+	if (port >= brd->maxports)
+		return;
+
 	ch = brd->channels[port];
 	if (!ch || ch->magic != DGNC_CHANNEL_MAGIC)
 		return;
 
 	/* Here we try to figure out what caused the interrupt to happen */
 	while (1) {
+
 		isr = readb(&ch->ch_neo_uart->isr_fcr);
 
 		/* Bail if no pending interrupt */
@@ -392,8 +408,7 @@ static inline void neo_parse_isr(struct dgnc_board *brd, uint port)
 			break;
 
 		/*
-		 * Yank off the upper 2 bits,
-		 * which just show that the FIFO's are enabled.
+		 * Yank off the upper 2 bits, which just show that the FIFO's are enabled.
 		 */
 		isr &= ~(UART_17158_IIR_FIFO_ENABLED);
 
@@ -492,6 +507,7 @@ static inline void neo_parse_isr(struct dgnc_board *brd, uint port)
 	}
 }
 
+
 static inline void neo_parse_lsr(struct dgnc_board *brd, uint port)
 {
 	struct channel_t *ch;
@@ -571,6 +587,7 @@ static inline void neo_parse_lsr(struct dgnc_board *brd, uint port)
 	}
 }
 
+
 /*
  * neo_param()
  * Send any/all changes to the line to the UART.
@@ -590,7 +607,7 @@ static void neo_param(struct tty_struct *tty)
 	if (!tty || tty->magic != TTY_MAGIC)
 		return;
 
-	un = (struct un_t *)tty->driver_data;
+	un = (struct un_t *) tty->driver_data;
 	if (!un || un->magic != DGNC_UNIT_MAGIC)
 		return;
 
@@ -624,6 +641,7 @@ static void neo_param(struct tty_struct *tty)
 		return;
 
 	} else if (ch->ch_custom_speed) {
+
 		baud = ch->ch_custom_speed;
 		/* Handle transition from B0 */
 		if (ch->ch_flags & CH_BAUD0) {
@@ -666,8 +684,7 @@ static void neo_param(struct tty_struct *tty)
 		};
 
 		/* Only use the TXPrint baud rate if the terminal unit is NOT open */
-		if (!(ch->ch_tun.un_flags & UN_ISOPEN) &&
-		    (un->un_type == DGNC_PRINT))
+		if (!(ch->ch_tun.un_flags & UN_ISOPEN) && (un->un_type == DGNC_PRINT))
 			baud = C_BAUD(ch->ch_pun.un_tty) & 0xff;
 		else
 			baud = C_BAUD(ch->ch_tun.un_tty) & 0xff;
@@ -680,8 +697,7 @@ static void neo_param(struct tty_struct *tty)
 
 		jindex = baud;
 
-		if ((iindex >= 0) && (iindex < 4) &&
-		    (jindex >= 0) && (jindex < 16))
+		if ((iindex >= 0) && (iindex < 4) && (jindex >= 0) && (jindex < 16))
 			baud = bauds[iindex][jindex];
 		else
 			baud = 0;
@@ -789,8 +805,7 @@ static void neo_param(struct tty_struct *tty)
 		neo_set_cts_flow_control(ch);
 	} else if (ch->ch_c_iflag & IXON) {
 		/* If start/stop is set to disable, then we should disable flow control */
-		if ((ch->ch_startc == _POSIX_VDISABLE) ||
-		    (ch->ch_stopc == _POSIX_VDISABLE))
+		if ((ch->ch_startc == _POSIX_VDISABLE) || (ch->ch_stopc == _POSIX_VDISABLE))
 			neo_set_no_output_flow_control(ch);
 		else
 			neo_set_ixon_flow_control(ch);
@@ -802,8 +817,7 @@ static void neo_param(struct tty_struct *tty)
 		neo_set_rts_flow_control(ch);
 	} else if (ch->ch_c_iflag & IXOFF) {
 		/* If start/stop is set to disable, then we should disable flow control */
-		if ((ch->ch_startc == _POSIX_VDISABLE) ||
-		    (ch->ch_stopc == _POSIX_VDISABLE))
+		if ((ch->ch_startc == _POSIX_VDISABLE) || (ch->ch_stopc == _POSIX_VDISABLE))
 			neo_set_no_input_flow_control(ch);
 		else
 			neo_set_ixoff_flow_control(ch);
@@ -827,12 +841,13 @@ static void neo_param(struct tty_struct *tty)
 	neo_parse_modem(ch, readb(&ch->ch_neo_uart->msr));
 }
 
+
 /*
  * Our board poller function.
  */
 static void neo_tasklet(unsigned long data)
 {
-	struct dgnc_board *bd = (struct dgnc_board *)data;
+	struct dgnc_board *bd = (struct dgnc_board *) data;
 	struct channel_t *ch;
 	unsigned long flags;
 	int i;
@@ -902,7 +917,9 @@ static void neo_tasklet(unsigned long data)
 
 	/* Allow interrupt routine to access the interrupt register again */
 	spin_unlock_irqrestore(&bd->bd_intr_lock, flags);
+
 }
+
 
 /*
  * dgnc_neo_intr()
@@ -914,7 +931,9 @@ static irqreturn_t neo_intr(int irq, void *voidbrd)
 	struct dgnc_board *brd = voidbrd;
 	struct channel_t *ch;
 	int port = 0;
-	int type;
+	int type = 0;
+	int current_port;
+	u32 tmp;
 	u32 uart_poll;
 	unsigned long flags;
 	unsigned long flags2;
@@ -949,15 +968,34 @@ static irqreturn_t neo_intr(int irq, void *voidbrd)
 
 	/* At this point, we have at least SOMETHING to service, dig further... */
 
+	current_port = 0;
+
 	/* Loop on each port */
 	while ((uart_poll & 0xff) != 0) {
-		type = uart_poll >> (8 + (port * 3));
-		type &= 0x7;
 
-		uart_poll &= ~(0x01 << port);
+		tmp = uart_poll;
+
+		/* Check current port to see if it has interrupt pending */
+		if ((tmp & dgnc_offset_table[current_port]) != 0) {
+			port = current_port;
+			type = tmp >> (8 + (port * 3));
+			type &= 0x7;
+		} else {
+			current_port++;
+			continue;
+		}
+
+		/* Remove this port + type from uart_poll */
+		uart_poll &= ~(dgnc_offset_table[port]);
+
+		if (!type) {
+			/* If no type, just ignore it, and move onto next port */
+			continue;
+		}
 
 		/* Switch on type of interrupt we have */
 		switch (type) {
+
 		case UART_17158_RXRDY_TIMEOUT:
 			/*
 			 * RXRDY Time-out is cleared by reading data in the
@@ -966,7 +1004,7 @@ static irqreturn_t neo_intr(int irq, void *voidbrd)
 
 			/* Verify the port is in range. */
 			if (port >= brd->nasync)
-				break;
+				continue;
 
 			ch = brd->channels[port];
 			neo_copy_data_from_uart_to_queue(ch);
@@ -976,14 +1014,14 @@ static irqreturn_t neo_intr(int irq, void *voidbrd)
 			dgnc_check_queue_flow_control(ch);
 			spin_unlock_irqrestore(&ch->ch_lock, flags2);
 
-			break;
+			continue;
 
 		case UART_17158_RX_LINE_STATUS:
 			/*
 			 * RXRDY and RX LINE Status (logic OR of LSR[4:1])
 			 */
 			neo_parse_lsr(brd, port);
-			break;
+			continue;
 
 		case UART_17158_TXRDY:
 			/*
@@ -999,14 +1037,14 @@ static irqreturn_t neo_intr(int irq, void *voidbrd)
 			 * it should be, I was getting things like RXDY too. Weird.
 			 */
 			neo_parse_isr(brd, port);
-			break;
+			continue;
 
 		case UART_17158_MSR:
 			/*
 			 * MSR or flow control was seen.
 			 */
 			neo_parse_isr(brd, port);
-			break;
+			continue;
 
 		default:
 			/*
@@ -1015,10 +1053,8 @@ static irqreturn_t neo_intr(int irq, void *voidbrd)
 			 * these once and awhile.
 			 * Its harmless, just ignore it and move on.
 			 */
-			break;
+			continue;
 		}
-
-		port++;
 	}
 
 	/*
@@ -1030,6 +1066,7 @@ static irqreturn_t neo_intr(int irq, void *voidbrd)
 
 	return IRQ_HANDLED;
 }
+
 
 /*
  * Neo specific way of turning off the receiver.
@@ -1045,6 +1082,7 @@ static void neo_disable_receiver(struct channel_t *ch)
 	neo_pci_posting_flush(ch->ch_bd);
 }
 
+
 /*
  * Neo specific way of turning on the receiver.
  * Used as a way to un-enforce queue flow control when in
@@ -1058,6 +1096,7 @@ static void neo_enable_receiver(struct channel_t *ch)
 	writeb(tmp, &ch->ch_neo_uart->ier);
 	neo_pci_posting_flush(ch->ch_bd);
 }
+
 
 static void neo_copy_data_from_uart_to_queue(struct channel_t *ch)
 {
@@ -1095,9 +1134,9 @@ static void neo_copy_data_from_uart_to_queue(struct channel_t *ch)
 	 * On the other hand, if the UART IS in FIFO mode, then ask
 	 * the UART to give us an approximation of data it has RX'ed.
 	 */
-	if (!(ch->ch_flags & CH_FIFO_ENABLED)) {
+	if (!(ch->ch_flags & CH_FIFO_ENABLED))
 		total = 0;
-	} else {
+	else {
 		total = readb(&ch->ch_neo_uart->rfifo);
 
 		/*
@@ -1114,6 +1153,7 @@ static void neo_copy_data_from_uart_to_queue(struct channel_t *ch)
 			total -= 3;
 	}
 
+
 	/*
 	 * Finally, bound the copy to make sure we don't overflow
 	 * our own queue...
@@ -1123,6 +1163,7 @@ static void neo_copy_data_from_uart_to_queue(struct channel_t *ch)
 	total = min(total, qleft);
 
 	while (total > 0) {
+
 		/*
 		 * Grab the linestatus register, we need to check
 		 * to see if there are any errors in the FIFO.
@@ -1138,7 +1179,7 @@ static void neo_copy_data_from_uart_to_queue(struct channel_t *ch)
 			break;
 
 		/* Make sure we don't go over the end of our queue */
-		n = min(((uint)total), (RQUEUESIZE - (uint)head));
+		n = min(((uint) total), (RQUEUESIZE - (uint) head));
 
 		/*
 		 * Cut down n even further if needed, this is to fix
@@ -1159,11 +1200,10 @@ static void neo_copy_data_from_uart_to_queue(struct channel_t *ch)
 		linestatus = 0;
 
 		/* Copy data from uart to the queue */
-		memcpy_fromio(ch->ch_rqueue + head,
-			      &ch->ch_neo_uart->txrxburst, n);
+		memcpy_fromio(ch->ch_rqueue + head, &ch->ch_neo_uart->txrxburst, n);
 
 		/*
-		 * Since RX_FIFO_DATA_ERROR was 0, we are guaranteed
+		 * Since RX_FIFO_DATA_ERROR was 0, we are guarenteed
 		 * that all the data currently in the FIFO is free of
 		 * breaks and parity/frame/orun errors.
 		 */
@@ -1188,6 +1228,7 @@ static void neo_copy_data_from_uart_to_queue(struct channel_t *ch)
 	 * Also deal with any possible queue overflow here as well.
 	 */
 	while (1) {
+
 		/*
 		 * Its possible we have a linestatus from the loop above
 		 * this, so we "OR" on any extra bits.
@@ -1213,8 +1254,7 @@ static void neo_copy_data_from_uart_to_queue(struct channel_t *ch)
 		 * we don't miss our TX FIFO emptys.
 		 */
 		if (linestatus & (UART_LSR_THRE | UART_17158_TX_AND_FIFO_CLR)) {
-			linestatus &= ~(UART_LSR_THRE |
-					UART_17158_TX_AND_FIFO_CLR);
+			linestatus &= ~(UART_LSR_THRE | UART_17158_TX_AND_FIFO_CLR);
 			ch->ch_flags |= (CH_TX_FIFO_EMPTY | CH_TX_FIFO_LWM);
 		}
 
@@ -1244,9 +1284,8 @@ static void neo_copy_data_from_uart_to_queue(struct channel_t *ch)
 			qleft++;
 		}
 
-		memcpy_fromio(ch->ch_rqueue + head,
-			      &ch->ch_neo_uart->txrxburst, 1);
-		ch->ch_equeue[head] = (unsigned char)linestatus;
+		memcpy_fromio(ch->ch_rqueue + head, &ch->ch_neo_uart->txrxburst, 1);
+		ch->ch_equeue[head] = (unsigned char) linestatus;
 
 		/* Ditch any remaining linestatus value. */
 		linestatus = 0;
@@ -1267,6 +1306,7 @@ static void neo_copy_data_from_uart_to_queue(struct channel_t *ch)
 	spin_unlock_irqrestore(&ch->ch_lock, flags);
 }
 
+
 /*
  * This function basically goes to sleep for secs, or until
  * it gets signalled that the port has fully drained.
@@ -1281,7 +1321,7 @@ static int neo_drain(struct tty_struct *tty, uint seconds)
 	if (!tty || tty->magic != TTY_MAGIC)
 		return -ENXIO;
 
-	un = (struct un_t *)tty->driver_data;
+	un = (struct un_t *) tty->driver_data;
 	if (!un || un->magic != DGNC_UNIT_MAGIC)
 		return -ENXIO;
 
@@ -1296,14 +1336,15 @@ static int neo_drain(struct tty_struct *tty, uint seconds)
 	/*
 	 * Go to sleep waiting for the tty layer to wake me back up when
 	 * the empty flag goes away.
+	 *
+	 * NOTE: TODO: Do something with time passed in.
 	 */
-	rc = wait_event_interruptible_timeout(un->un_flags_wait,
-					      ((un->un_flags & UN_EMPTY) == 0),
-					      msecs_to_jiffies(seconds * 1000));
+	rc = wait_event_interruptible(un->un_flags_wait, ((un->un_flags & UN_EMPTY) == 0));
 
 	/* If ret is non-zero, user ctrl-c'ed us */
 	return rc;
 }
+
 
 /*
  * Flush the WRITE FIFO on the Neo.
@@ -1318,11 +1359,11 @@ static void neo_flush_uart_write(struct channel_t *ch)
 	if (!ch || ch->magic != DGNC_CHANNEL_MAGIC)
 		return;
 
-	writeb((UART_FCR_ENABLE_FIFO | UART_FCR_CLEAR_XMIT),
-	       &ch->ch_neo_uart->isr_fcr);
+	writeb((UART_FCR_ENABLE_FIFO | UART_FCR_CLEAR_XMIT), &ch->ch_neo_uart->isr_fcr);
 	neo_pci_posting_flush(ch->ch_bd);
 
 	for (i = 0; i < 10; i++) {
+
 		/* Check to see if the UART feels it completely flushed the FIFO. */
 		tmp = readb(&ch->ch_neo_uart->isr_fcr);
 		if (tmp & 4)
@@ -1333,6 +1374,7 @@ static void neo_flush_uart_write(struct channel_t *ch)
 
 	ch->ch_flags |= (CH_TX_FIFO_EMPTY | CH_TX_FIFO_LWM);
 }
+
 
 /*
  * Flush the READ FIFO on the Neo.
@@ -1347,11 +1389,11 @@ static void neo_flush_uart_read(struct channel_t *ch)
 	if (!ch || ch->magic != DGNC_CHANNEL_MAGIC)
 		return;
 
-	writeb(UART_FCR_ENABLE_FIFO | UART_FCR_CLEAR_RCVR,
-	       &ch->ch_neo_uart->isr_fcr);
+	writeb((UART_FCR_ENABLE_FIFO | UART_FCR_CLEAR_RCVR), &ch->ch_neo_uart->isr_fcr);
 	neo_pci_posting_flush(ch->ch_bd);
 
 	for (i = 0; i < 10; i++) {
+
 		/* Check to see if the UART feels it completely flushed the FIFO. */
 		tmp = readb(&ch->ch_neo_uart->isr_fcr);
 		if (tmp & 2)
@@ -1360,6 +1402,7 @@ static void neo_flush_uart_read(struct channel_t *ch)
 			break;
 	}
 }
+
 
 static void neo_copy_data_from_queue_to_uart(struct channel_t *ch)
 {
@@ -1382,7 +1425,7 @@ static void neo_copy_data_from_queue_to_uart(struct channel_t *ch)
 
 	/* If port is "stopped", don't send any data to the UART */
 	if ((ch->ch_flags & CH_FORCED_STOP) ||
-	    (ch->ch_flags & CH_BREAK_SENDING))
+		 (ch->ch_flags & CH_BREAK_SENDING))
 		goto exit_unlock;
 
 	/*
@@ -1419,8 +1462,7 @@ static void neo_copy_data_from_queue_to_uart(struct channel_t *ch)
 				ch->ch_tun.un_flags |= (UN_EMPTY);
 			}
 
-			writeb(ch->ch_wqueue[ch->ch_w_tail],
-			       &ch->ch_neo_uart->txrx);
+			writeb(ch->ch_wqueue[ch->ch_w_tail], &ch->ch_neo_uart->txrx);
 			ch->ch_w_tail++;
 			ch->ch_w_tail &= WQUEUEMASK;
 			ch->ch_txcount++;
@@ -1440,7 +1482,7 @@ static void neo_copy_data_from_queue_to_uart(struct channel_t *ch)
 
 		n = readb(&ch->ch_neo_uart->tfifo);
 
-		if ((unsigned int)n > ch->ch_t_tlevel)
+		if ((unsigned int) n > ch->ch_t_tlevel)
 			goto exit_unlock;
 
 		n = UART_17158_TX_FIFOSIZE - ch->ch_t_tlevel;
@@ -1457,6 +1499,7 @@ static void neo_copy_data_from_queue_to_uart(struct channel_t *ch)
 	n = min(n, qlen);
 
 	while (n > 0) {
+
 		s = ((head >= tail) ? head : WQUEUESIZE) - tail;
 		s = min(s, n);
 
@@ -1487,8 +1530,7 @@ static void neo_copy_data_from_queue_to_uart(struct channel_t *ch)
 			ch->ch_tun.un_flags |= (UN_EMPTY);
 		}
 
-		memcpy_toio(&ch->ch_neo_uart->txrxburst,
-			    ch->ch_wqueue + tail, s);
+		memcpy_toio(&ch->ch_neo_uart->txrxburst, ch->ch_wqueue + tail, s);
 
 		/* Add and flip queue if needed */
 		tail = (tail + s) & WQUEUEMASK;
@@ -1508,6 +1550,7 @@ static void neo_copy_data_from_queue_to_uart(struct channel_t *ch)
 exit_unlock:
 	spin_unlock_irqrestore(&ch->ch_lock, flags);
 }
+
 
 static void neo_parse_modem(struct channel_t *ch, unsigned char signals)
 {
@@ -1565,6 +1608,7 @@ static void neo_parse_modem(struct channel_t *ch, unsigned char signals)
 		ch->ch_mistat &= ~UART_MSR_CTS;
 }
 
+
 /* Make the UART raise any of the output signals we want up */
 static void neo_assert_modem_signals(struct channel_t *ch)
 {
@@ -1585,6 +1629,7 @@ static void neo_assert_modem_signals(struct channel_t *ch)
 	udelay(10);
 }
 
+
 static void neo_send_start_character(struct channel_t *ch)
 {
 	if (!ch || ch->magic != DGNC_CHANNEL_MAGIC)
@@ -1597,6 +1642,7 @@ static void neo_send_start_character(struct channel_t *ch)
 		udelay(10);
 	}
 }
+
 
 static void neo_send_stop_character(struct channel_t *ch)
 {
@@ -1611,19 +1657,21 @@ static void neo_send_stop_character(struct channel_t *ch)
 	}
 }
 
+
 /*
  * neo_uart_init
  */
 static void neo_uart_init(struct channel_t *ch)
 {
+
 	writeb(0, &ch->ch_neo_uart->ier);
 	writeb(0, &ch->ch_neo_uart->efr);
 	writeb(UART_EFR_ECB, &ch->ch_neo_uart->efr);
 
+
 	/* Clear out UART and FIFO */
 	readb(&ch->ch_neo_uart->txrx);
-	writeb(UART_FCR_ENABLE_FIFO | UART_FCR_CLEAR_RCVR | UART_FCR_CLEAR_XMIT,
-	       &ch->ch_neo_uart->isr_fcr);
+	writeb((UART_FCR_ENABLE_FIFO|UART_FCR_CLEAR_RCVR|UART_FCR_CLEAR_XMIT), &ch->ch_neo_uart->isr_fcr);
 	readb(&ch->ch_neo_uart->lsr);
 	readb(&ch->ch_neo_uart->msr);
 
@@ -1633,6 +1681,7 @@ static void neo_uart_init(struct channel_t *ch)
 	writeb(ch->ch_mostat, &ch->ch_neo_uart->mcr);
 	neo_pci_posting_flush(ch->ch_bd);
 }
+
 
 /*
  * Make the UART completely turn off.
@@ -1646,6 +1695,7 @@ static void neo_uart_off(struct channel_t *ch)
 	writeb(0, &ch->ch_neo_uart->ier);
 	neo_pci_posting_flush(ch->ch_bd);
 }
+
 
 static uint neo_get_uart_bytes_left(struct channel_t *ch)
 {
@@ -1667,6 +1717,7 @@ static uint neo_get_uart_bytes_left(struct channel_t *ch)
 
 	return left;
 }
+
 
 /* Channel lock MUST be held by the calling function! */
 static void neo_send_break(struct channel_t *ch, int msecs)
@@ -1703,6 +1754,7 @@ static void neo_send_break(struct channel_t *ch, int msecs)
 	}
 }
 
+
 /*
  * neo_send_immediate_char.
  *
@@ -1720,8 +1772,8 @@ static void neo_send_immediate_char(struct channel_t *ch, unsigned char c)
 	neo_pci_posting_flush(ch->ch_bd);
 }
 
-static unsigned int neo_read_eeprom(unsigned char __iomem *base,
-				    unsigned int address)
+
+static unsigned int neo_read_eeprom(unsigned char __iomem *base, unsigned int address)
 {
 	unsigned int enable;
 	unsigned int bits;
@@ -1731,7 +1783,7 @@ static unsigned int neo_read_eeprom(unsigned char __iomem *base,
 	/* enable chip select */
 	writeb(NEO_EECS, base + NEO_EEREG);
 	/* READ */
-	enable = address | 0x180;
+	enable = (address | 0x180);
 
 	for (bits = 9; bits--; ) {
 		databit = (enable & (1 << bits)) ? NEO_EEDI : 0;
@@ -1761,6 +1813,7 @@ static unsigned int neo_read_eeprom(unsigned char __iomem *base,
 	return val;
 }
 
+
 static void neo_vpd(struct dgnc_board *brd)
 {
 	unsigned int i = 0;
@@ -1775,24 +1828,19 @@ static void neo_vpd(struct dgnc_board *brd)
 	/* Store the VPD into our buffer */
 	for (i = 0; i < NEO_VPD_IMAGESIZE; i++) {
 		a = neo_read_eeprom(brd->re_map_membase, i);
-		brd->vpd[i * 2] = a & 0xff;
-		brd->vpd[(i * 2) + 1] = (a >> 8) & 0xff;
+		brd->vpd[i*2] = a & 0xff;
+		brd->vpd[(i*2)+1] = (a >> 8) & 0xff;
 	}
 
-	/*
-	 * brd->vpd has different name tags by below index.
-	 * 0x08 : long resource name tag
-	 * 0x10 : long resource name tage (PCI-66 files)
-	 * 0x7F : small resource end tag
-	 */
-	if  (((brd->vpd[0x08] != 0x82) &&
-	      (brd->vpd[0x10] != 0x82)) ||
-	     (brd->vpd[0x7F] != 0x78)) {
+	if  (((brd->vpd[0x08] != 0x82)	   /* long resource name tag */
+		&&  (brd->vpd[0x10] != 0x82))   /* long resource name tag (PCI-66 files)*/
+		||  (brd->vpd[0x7F] != 0x78)) { /* small resource end tag */
+
 		memset(brd->vpd, '\0', NEO_VPD_IMAGESIZE);
 	} else {
 		/* Search for the serial number */
 		for (i = 0; i < NEO_VPD_IMAGEBYTES - 3; i++)
 			if (brd->vpd[i] == 'S' && brd->vpd[i + 1] == 'N')
-				strncpy(brd->serial_num, &brd->vpd[i + 3], 9);
+				strncpy(brd->serial_num, &(brd->vpd[i + 3]), 9);
 	}
 }

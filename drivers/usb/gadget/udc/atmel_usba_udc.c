@@ -17,15 +17,16 @@
 #include <linux/device.h>
 #include <linux/dma-mapping.h>
 #include <linux/list.h>
-#include <linux/mfd/syscon.h>
 #include <linux/platform_device.h>
-#include <linux/regmap.h>
 #include <linux/usb/ch9.h>
 #include <linux/usb/gadget.h>
 #include <linux/usb/atmel_usba_udc.h>
 #include <linux/delay.h>
+#include <linux/platform_data/atmel.h>
 #include <linux/of.h>
 #include <linux/of_gpio.h>
+
+#include <asm/gpio.h>
 
 #include "atmel_usba_udc.h"
 
@@ -91,7 +92,7 @@ static ssize_t queue_dbg_read(struct file *file, char __user *buf,
 	if (!access_ok(VERIFY_WRITE, buf, nbytes))
 		return -EFAULT;
 
-	inode_lock(file_inode(file));
+	mutex_lock(&file_inode(file)->i_mutex);
 	list_for_each_entry_safe(req, tmp_req, queue, queue) {
 		len = snprintf(tmpbuf, sizeof(tmpbuf),
 				"%8p %08x %c%c%c %5d %c%c%c\n",
@@ -118,7 +119,7 @@ static ssize_t queue_dbg_read(struct file *file, char __user *buf,
 		nbytes -= len;
 		buf += len;
 	}
-	inode_unlock(file_inode(file));
+	mutex_unlock(&file_inode(file)->i_mutex);
 
 	return actual;
 }
@@ -143,7 +144,7 @@ static int regs_dbg_open(struct inode *inode, struct file *file)
 	u32 *data;
 	int ret = -ENOMEM;
 
-	inode_lock(inode);
+	mutex_lock(&inode->i_mutex);
 	udc = inode->i_private;
 	data = kmalloc(inode->i_size, GFP_KERNEL);
 	if (!data)
@@ -158,7 +159,7 @@ static int regs_dbg_open(struct inode *inode, struct file *file)
 	ret = 0;
 
 out:
-	inode_unlock(inode);
+	mutex_unlock(&inode->i_mutex);
 
 	return ret;
 }
@@ -169,11 +170,11 @@ static ssize_t regs_dbg_read(struct file *file, char __user *buf,
 	struct inode *inode = file_inode(file);
 	int ret;
 
-	inode_lock(inode);
+	mutex_lock(&inode->i_mutex);
 	ret = simple_read_from_buffer(buf, nbytes, ppos,
 			file->private_data,
 			file_inode(file)->i_size);
-	inode_unlock(inode);
+	mutex_unlock(&inode->i_mutex);
 
 	return ret;
 }
@@ -703,8 +704,8 @@ static int queue_dma(struct usba_udc *udc, struct usba_ep *ep,
 	unsigned long flags;
 	int ret;
 
-	DBG(DBG_DMA, "%s: req l/%u d/%pad %c%c%c\n",
-		ep->ep.name, req->req.length, &req->req.dma,
+	DBG(DBG_DMA, "%s: req l/%u d/%08x %c%c%c\n",
+		ep->ep.name, req->req.length, req->req.dma,
 		req->req.zero ? 'Z' : 'z',
 		req->req.short_not_ok ? 'S' : 's',
 		req->req.no_interrupt ? 'I' : 'i');
@@ -1044,6 +1045,20 @@ static void reset_all_endpoints(struct usba_udc *udc)
 	list_for_each_entry_safe(req, tmp_req, &ep->queue, queue) {
 		list_del_init(&req->queue);
 		request_complete(ep, req, -ECONNRESET);
+	}
+
+	/* NOTE:  normally, the next call to the gadget driver is in
+	 * charge of disabling endpoints... usually disconnect().
+	 * The exception would be entering a high speed test mode.
+	 *
+	 * FIXME remove this code ... and retest thoroughly.
+	 */
+	list_for_each_entry(ep, &udc->gadget.ep_list, ep.ep_list) {
+		if (ep->ep.desc) {
+			spin_unlock(&udc->lock);
+			usba_ep_disable(&ep->ep);
+			spin_lock(&udc->lock);
+		}
 	}
 }
 
@@ -1619,7 +1634,7 @@ static irqreturn_t usba_udc_irq(int irq, void *devid)
 	spin_lock(&udc->lock);
 
 	int_enb = usba_int_enb_get(udc);
-	status = usba_readl(udc, INT_STA) & (int_enb | USBA_HIGH_SPEED);
+	status = usba_readl(udc, INT_STA) & int_enb;
 	DBG(DBG_INT, "irq, status=%#08x\n", status);
 
 	if (status & USBA_DET_SUSPEND) {
@@ -1874,15 +1889,20 @@ static int atmel_usba_stop(struct usb_gadget *gadget)
 #ifdef CONFIG_OF
 static void at91sam9rl_toggle_bias(struct usba_udc *udc, int is_on)
 {
-	regmap_update_bits(udc->pmc, AT91_CKGR_UCKR, AT91_PMC_BIASEN,
-			   is_on ? AT91_PMC_BIASEN : 0);
+	unsigned int uckr = at91_pmc_read(AT91_CKGR_UCKR);
+
+	if (is_on)
+		at91_pmc_write(AT91_CKGR_UCKR, uckr | AT91_PMC_BIASEN);
+	else
+		at91_pmc_write(AT91_CKGR_UCKR, uckr & ~(AT91_PMC_BIASEN));
 }
 
 static void at91sam9g45_pulse_bias(struct usba_udc *udc)
 {
-	regmap_update_bits(udc->pmc, AT91_CKGR_UCKR, AT91_PMC_BIASEN, 0);
-	regmap_update_bits(udc->pmc, AT91_CKGR_UCKR, AT91_PMC_BIASEN,
-			   AT91_PMC_BIASEN);
+	unsigned int uckr = at91_pmc_read(AT91_CKGR_UCKR);
+
+	at91_pmc_write(AT91_CKGR_UCKR, uckr & ~(AT91_PMC_BIASEN));
+	at91_pmc_write(AT91_CKGR_UCKR, uckr | AT91_PMC_BIASEN);
 }
 
 static const struct usba_udc_errata at91sam9rl_errata = {
@@ -1919,9 +1939,6 @@ static struct usba_ep * atmel_udc_of_init(struct platform_device *pdev,
 		return ERR_PTR(-EINVAL);
 
 	udc->errata = match->data;
-	udc->pmc = syscon_regmap_lookup_by_compatible("atmel,at91sam9g45-pmc");
-	if (udc->errata && IS_ERR(udc->pmc))
-		return ERR_CAST(udc->pmc);
 
 	udc->num_ep = 0;
 
@@ -1972,10 +1989,6 @@ static struct usba_ep * atmel_udc_of_init(struct platform_device *pdev,
 		ep->can_isoc = of_property_read_bool(pp, "atmel,can-isoc");
 
 		ret = of_property_read_string(pp, "name", &name);
-		if (ret) {
-			dev_err(&pdev->dev, "of_probe: name error(%d)\n", ret);
-			goto err;
-		}
 		ep->ep.name = name;
 
 		ep->ep_regs = udc->regs + USBA_EPT_BASE(i);
@@ -1985,17 +1998,6 @@ static struct usba_ep * atmel_udc_of_init(struct platform_device *pdev,
 		usb_ep_set_maxpacket_limit(&ep->ep, ep->fifo_size);
 		ep->udc = udc;
 		INIT_LIST_HEAD(&ep->queue);
-
-		if (ep->index == 0) {
-			ep->ep.caps.type_control = true;
-		} else {
-			ep->ep.caps.type_iso = ep->can_isoc;
-			ep->ep.caps.type_bulk = true;
-			ep->ep.caps.type_int = true;
-		}
-
-		ep->ep.caps.dir_in = true;
-		ep->ep.caps.dir_out = true;
 
 		if (i)
 			list_add_tail(&ep->ep.ep_list, &udc->gadget.ep_list);
@@ -2060,17 +2062,6 @@ static struct usba_ep * usba_udc_pdata(struct platform_device *pdev,
 		ep->index = pdata->ep[i].index;
 		ep->can_dma = pdata->ep[i].can_dma;
 		ep->can_isoc = pdata->ep[i].can_isoc;
-
-		if (i == 0) {
-			ep->ep.caps.type_control = true;
-		} else {
-			ep->ep.caps.type_iso = ep->can_isoc;
-			ep->ep.caps.type_bulk = true;
-			ep->ep.caps.type_int = true;
-		}
-
-		ep->ep.caps.dir_in = true;
-		ep->ep.caps.dir_out = true;
 
 		if (i)
 			list_add_tail(&ep->ep.ep_list, &udc->gadget.ep_list);
@@ -2195,7 +2186,7 @@ static int usba_udc_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int usba_udc_remove(struct platform_device *pdev)
+static int __exit usba_udc_remove(struct platform_device *pdev)
 {
 	struct usba_udc *udc;
 	int i;
@@ -2212,7 +2203,7 @@ static int usba_udc_remove(struct platform_device *pdev)
 	return 0;
 }
 
-#ifdef CONFIG_PM_SLEEP
+#ifdef CONFIG_PM
 static int usba_udc_suspend(struct device *dev)
 {
 	struct usba_udc *udc = dev_get_drvdata(dev);
@@ -2267,7 +2258,7 @@ static int usba_udc_resume(struct device *dev)
 static SIMPLE_DEV_PM_OPS(usba_udc_pm_ops, usba_udc_suspend, usba_udc_resume);
 
 static struct platform_driver udc_driver = {
-	.remove		= usba_udc_remove,
+	.remove		= __exit_p(usba_udc_remove),
 	.driver		= {
 		.name		= "atmel_usba_udc",
 		.pm		= &usba_udc_pm_ops,

@@ -1,6 +1,6 @@
 /*
- * Copyright (c) 2016 Mellanox Technologies Ltd. All rights reserved.
- * Copyright (c) 2015 System Fabric Works, Inc. All rights reserved.
+ * Copyright (c) 2009-2011 Mellanox Technologies Ltd. All rights reserved.
+ * Copyright (c) 2009-2011 System Fabric Works, Inc. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -35,9 +35,9 @@
 #include "rxe_opcode.h"
 #include "rxe_hdr.h"
 
-/* useful information about work request opcodes and pkt opcodes in
- * table form
- */
+/* useful information about work request opcodes and pkt opcodes
+   in table form */
+
 struct rxe_wr_opcode_info rxe_wr_opcode_info[] = {
 	[IB_WR_RDMA_WRITE]				= {
 		.name	= "IB_WR_RDMA_WRITE",
@@ -114,13 +114,13 @@ struct rxe_wr_opcode_info rxe_wr_opcode_info[] = {
 	[IB_WR_LOCAL_INV]				= {
 		.name	= "IB_WR_LOCAL_INV",
 		.mask	= {
-			[IB_QPT_RC]	= WR_REG_MASK,
+			/* not supported */
 		},
 	},
-	[IB_WR_REG_MR]					= {
-		.name	= "IB_WR_REG_MR",
+	[IB_WR_FAST_REG_MR]				= {
+		.name	= "IB_WR_FAST_REG_MR",
 		.mask	= {
-			[IB_QPT_RC]	= WR_REG_MASK,
+			/* not supported */
 		},
 	},
 };
@@ -374,8 +374,8 @@ struct rxe_opcode_info rxe_opcode[RXE_NUM_OPCODE] = {
 						+ RXE_ATMETH_BYTES,
 		}
 	},
-	[IB_OPCODE_RC_SEND_LAST_WITH_INVALIDATE]		= {
-		.name	= "IB_OPCODE_RC_SEND_LAST_WITH_INVALIDATE",
+	[IB_OPCODE_RC_SEND_LAST_INV]		= {
+		.name	= "IB_OPCODE_RC_SEND_LAST_INV",
 		.mask	= RXE_IETH_MASK | RXE_PAYLOAD_MASK | RXE_REQ_MASK
 				| RXE_COMP_MASK | RXE_SEND_MASK | RXE_END_MASK,
 		.length = RXE_BTH_BYTES + RXE_IETH_BYTES,
@@ -386,7 +386,7 @@ struct rxe_opcode_info rxe_opcode[RXE_NUM_OPCODE] = {
 						+ RXE_IETH_BYTES,
 		}
 	},
-	[IB_OPCODE_RC_SEND_ONLY_WITH_INVALIDATE]		= {
+	[IB_OPCODE_RC_SEND_ONLY_INV]		= {
 		.name	= "IB_OPCODE_RC_SEND_ONLY_INV",
 		.mask	= RXE_IETH_MASK | RXE_PAYLOAD_MASK | RXE_REQ_MASK
 				| RXE_COMP_MASK | RXE_RWR_MASK | RXE_SEND_MASK
@@ -923,6 +923,18 @@ struct rxe_opcode_info rxe_opcode[RXE_NUM_OPCODE] = {
 			[RXE_PAYLOAD]	= RXE_BTH_BYTES +
 						+ RXE_ATMETH_BYTES
 						+ RXE_DETH_BYTES +
+						+ RXE_RDETH_BYTES,
+		}
+	},
+	[IB_OPCODE_RD_RESYNC]			= {
+		.name	= "RD_RESYNC",
+		.mask	= RXE_RDETH_MASK | RXE_DETH_MASK | RXE_REQ_MASK
+				| RXE_START_MASK | RXE_END_MASK,
+		.length = RXE_BTH_BYTES + RXE_DETH_BYTES + RXE_RDETH_BYTES,
+		.offset = {
+			[RXE_BTH]	= 0,
+			[RXE_RDETH]	= RXE_BTH_BYTES,
+			[RXE_DETH]	= RXE_BTH_BYTES
 						+ RXE_RDETH_BYTES,
 		}
 	},

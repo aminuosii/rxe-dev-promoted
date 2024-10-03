@@ -33,6 +33,8 @@ static inline void svcpu_put(struct kvmppc_book3s_shadow_vcpu *svcpu)
 }
 #endif
 
+#define SPAPR_TCE_SHIFT		12
+
 #ifdef CONFIG_KVM_BOOK3S_HV_POSSIBLE
 #define KVM_DEFAULT_HPT_ORDER	24	/* 16MB HPT by default */
 #endif
@@ -81,20 +83,6 @@ static inline long try_lock_hpte(__be64 *hpte, unsigned long bits)
 		     : "r" (hpte), "r" (be_bits), "r" (be_lockbit)
 		     : "cc", "memory");
 	return old == 0;
-}
-
-static inline void unlock_hpte(__be64 *hpte, unsigned long hpte_v)
-{
-	hpte_v &= ~HPTE_V_HVLOCK;
-	asm volatile(PPC_RELEASE_BARRIER "" : : : "memory");
-	hpte[0] = cpu_to_be64(hpte_v);
-}
-
-/* Without barrier */
-static inline void __unlock_hpte(__be64 *hpte, unsigned long hpte_v)
-{
-	hpte_v &= ~HPTE_V_HVLOCK;
-	hpte[0] = cpu_to_be64(hpte_v);
 }
 
 static inline int __hpte_actual_psize(unsigned int lp, int psize)
@@ -276,46 +264,46 @@ static inline unsigned long hpte_make_readonly(unsigned long ptel)
 	return ptel;
 }
 
-static inline bool hpte_cache_flags_ok(unsigned long hptel, bool is_ci)
+static inline int hpte_cache_flags_ok(unsigned long ptel, unsigned long io_type)
 {
-	unsigned int wimg = hptel & HPTE_R_WIMG;
+	unsigned int wimg = ptel & HPTE_R_WIMG;
 
 	/* Handle SAO */
 	if (wimg == (HPTE_R_W | HPTE_R_I | HPTE_R_M) &&
 	    cpu_has_feature(CPU_FTR_ARCH_206))
 		wimg = HPTE_R_M;
 
-	if (!is_ci)
+	if (!io_type)
 		return wimg == HPTE_R_M;
-	/*
-	 * if host is mapped cache inhibited, make sure hptel also have
-	 * cache inhibited.
-	 */
-	if (wimg & HPTE_R_W) /* FIXME!! is this ok for all guest. ? */
-		return false;
-	return !!(wimg & HPTE_R_I);
+
+	return (wimg & (HPTE_R_W | HPTE_R_I)) == io_type;
 }
 
 /*
  * If it's present and writable, atomically set dirty and referenced bits and
- * return the PTE, otherwise return 0.
+ * return the PTE, otherwise return 0. If we find a transparent hugepage
+ * and if it is marked splitting we return 0;
  */
-static inline pte_t kvmppc_read_update_linux_pte(pte_t *ptep, int writing)
+static inline pte_t kvmppc_read_update_linux_pte(pte_t *ptep, int writing,
+						 unsigned int hugepage)
 {
 	pte_t old_pte, new_pte = __pte(0);
 
 	while (1) {
+		old_pte = *ptep;
 		/*
-		 * Make sure we don't reload from ptep
+		 * wait until _PAGE_BUSY is clear then set it atomically
 		 */
-		old_pte = READ_ONCE(*ptep);
-		/*
-		 * wait until H_PAGE_BUSY is clear then set it atomically
-		 */
-		if (unlikely(pte_val(old_pte) & H_PAGE_BUSY)) {
+		if (unlikely(pte_val(old_pte) & _PAGE_BUSY)) {
 			cpu_relax();
 			continue;
 		}
+#ifdef CONFIG_TRANSPARENT_HUGEPAGE
+		/* If hugepage and is trans splitting return None */
+		if (unlikely(hugepage &&
+			     pmd_trans_splitting(pte_pmd(old_pte))))
+			return __pte(0);
+#endif
 		/* If pte is not present return None */
 		if (unlikely(!(pte_val(old_pte) & _PAGE_PRESENT)))
 			return __pte(0);
@@ -324,10 +312,25 @@ static inline pte_t kvmppc_read_update_linux_pte(pte_t *ptep, int writing)
 		if (writing && pte_write(old_pte))
 			new_pte = pte_mkdirty(new_pte);
 
-		if (pte_xchg(ptep, old_pte, new_pte))
+		if (pte_val(old_pte) == __cmpxchg_u64((unsigned long *)ptep,
+						      pte_val(old_pte),
+						      pte_val(new_pte))) {
 			break;
+		}
 	}
 	return new_pte;
+}
+
+
+/* Return HPTE cache control bits corresponding to Linux pte bits */
+static inline unsigned long hpte_cache_bits(unsigned long pte_val)
+{
+#if _PAGE_NO_CACHE == HPTE_R_I && _PAGE_WRITETHRU == HPTE_R_W
+	return pte_val & (HPTE_R_W | HPTE_R_I);
+#else
+	return ((pte_val & _PAGE_NO_CACHE) ? HPTE_R_I : 0) +
+		((pte_val & _PAGE_WRITETHRU) ? HPTE_R_W : 0);
+#endif
 }
 
 static inline bool hpte_read_permission(unsigned long pp, unsigned long key)
@@ -418,12 +421,8 @@ static inline void note_hpte_modification(struct kvm *kvm,
  */
 static inline struct kvm_memslots *kvm_memslots_raw(struct kvm *kvm)
 {
-	return rcu_dereference_raw_notrace(kvm->memslots[0]);
+	return rcu_dereference_raw_notrace(kvm->memslots);
 }
-
-extern void kvmppc_mmu_debugfs_init(struct kvm *kvm);
-
-extern void kvmhv_rm_send_ipi(int cpu);
 
 #endif /* CONFIG_KVM_BOOK3S_HV_POSSIBLE */
 

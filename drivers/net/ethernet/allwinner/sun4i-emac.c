@@ -28,7 +28,6 @@
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/phy.h>
-#include <linux/soc/sunxi/sunxi_sram.h>
 
 #include "sun4i-emac.h"
 
@@ -428,7 +427,7 @@ static void emac_timeout(struct net_device *dev)
 	emac_reset(db);
 	emac_init_device(dev);
 	/* We can accept TX packets again */
-	netif_trans_update(dev);
+	dev->trans_start = jiffies;
 	netif_wake_queue(dev);
 
 	/* Restore previous register address */
@@ -468,7 +467,7 @@ static int emac_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		       db->membase + EMAC_TX_CTL0_REG);
 
 		/* save the time stamp */
-		netif_trans_update(dev);
+		dev->trans_start = jiffies;
 	} else if (channel == 1) {
 		/* set TX len */
 		writel(skb->len, db->membase + EMAC_TX_PL1_REG);
@@ -477,7 +476,7 @@ static int emac_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		       db->membase + EMAC_TX_CTL1_REG);
 
 		/* save the time stamp */
-		netif_trans_update(dev);
+		dev->trans_start = jiffies;
 	}
 
 	if ((db->tx_fifo_stat & 3) == 3) {
@@ -847,32 +846,22 @@ static int emac_probe(struct platform_device *pdev)
 	if (ndev->irq == -ENXIO) {
 		netdev_err(ndev, "No irq resource\n");
 		ret = ndev->irq;
-		goto out_iounmap;
+		goto out;
 	}
 
 	db->clk = devm_clk_get(&pdev->dev, NULL);
 	if (IS_ERR(db->clk)) {
 		ret = PTR_ERR(db->clk);
-		goto out_iounmap;
+		goto out;
 	}
 
-	ret = clk_prepare_enable(db->clk);
-	if (ret) {
-		dev_err(&pdev->dev, "Error couldn't enable clock (%d)\n", ret);
-		goto out_iounmap;
-	}
-
-	ret = sunxi_sram_claim(&pdev->dev);
-	if (ret) {
-		dev_err(&pdev->dev, "Error couldn't map SRAM to device\n");
-		goto out_clk_disable_unprepare;
-	}
+	clk_prepare_enable(db->clk);
 
 	db->phy_node = of_parse_phandle(np, "phy", 0);
 	if (!db->phy_node) {
 		dev_err(&pdev->dev, "no associated PHY\n");
 		ret = -ENODEV;
-		goto out_release_sram;
+		goto out;
 	}
 
 	/* Read MAC-address from DT */
@@ -904,7 +893,7 @@ static int emac_probe(struct platform_device *pdev)
 	if (ret) {
 		dev_err(&pdev->dev, "Registering netdev failed!\n");
 		ret = -ENODEV;
-		goto out_release_sram;
+		goto out;
 	}
 
 	dev_info(&pdev->dev, "%s: at %p, IRQ %d MAC: %pM\n",
@@ -912,12 +901,6 @@ static int emac_probe(struct platform_device *pdev)
 
 	return 0;
 
-out_release_sram:
-	sunxi_sram_release(&pdev->dev);
-out_clk_disable_unprepare:
-	clk_disable_unprepare(db->clk);
-out_iounmap:
-	iounmap(db->membase);
 out:
 	dev_err(db->dev, "not found (%d).\n", ret);
 
@@ -929,12 +912,8 @@ out:
 static int emac_remove(struct platform_device *pdev)
 {
 	struct net_device *ndev = platform_get_drvdata(pdev);
-	struct emac_board_info *db = netdev_priv(ndev);
 
 	unregister_netdev(ndev);
-	sunxi_sram_release(&pdev->dev);
-	clk_disable_unprepare(db->clk);
-	iounmap(db->membase);
 	free_netdev(ndev);
 
 	dev_dbg(&pdev->dev, "released and freed device\n");

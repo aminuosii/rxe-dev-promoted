@@ -42,11 +42,6 @@ static inline int arch_spin_is_locked(arch_spinlock_t *lock)
 	return ((counters >> 16) ^ counters) & 0xffff;
 }
 
-static inline int arch_spin_value_unlocked(arch_spinlock_t lock)
-{
-	return lock.h.serving_now == lock.h.ticket;
-}
-
 #define arch_spin_lock_flags(lock, flags) arch_spin_lock(lock)
 #define arch_spin_unlock_wait(x) \
 	while (arch_spin_is_locked(x)) { cpu_relax(); }
@@ -114,7 +109,7 @@ static inline void arch_spin_lock(arch_spinlock_t *lock)
 		"	 subu	%[ticket], %[my_ticket], %[ticket]	\n"
 		"2:							\n"
 		"	.subsection 2					\n"
-		"4:	andi	%[ticket], %[ticket], 0xffff		\n"
+		"4:	andi	%[ticket], %[ticket], 0x1fff		\n"
 		"	sll	%[ticket], 5				\n"
 		"							\n"
 		"6:	bnez	%[ticket], 6b				\n"
@@ -322,7 +317,7 @@ static inline void arch_write_lock(arch_rwlock_t *rw)
 
 static inline void arch_write_unlock(arch_rwlock_t *rw)
 {
-	smp_mb__before_llsc();
+	smp_mb();
 
 	__asm__ __volatile__(
 	"				# arch_write_unlock	\n"

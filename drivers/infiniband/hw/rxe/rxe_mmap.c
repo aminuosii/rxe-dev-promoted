@@ -1,6 +1,7 @@
 /*
- * Copyright (c) 2016 Mellanox Technologies Ltd. All rights reserved.
- * Copyright (c) 2015 System Fabric Works, Inc. All rights reserved.
+ * Copyright (c) 2009-2011 Mellanox Technologies Ltd. All rights reserved.
+ * Copyright (c) 2009-2011 System Fabric Works, Inc. All rights reserved.
+ * Copyright (c) 2006, 2007 QLogic Corporation. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -59,7 +60,7 @@ void rxe_mmap_release(struct kref *ref)
 }
 
 /*
- * open and close keep track of how many times the memory region is mapped,
+ * open and close keep track of how many times the CQ is mapped,
  * to avoid releasing it.
  */
 static void rxe_vma_open(struct vm_area_struct *vma)
@@ -106,12 +107,8 @@ int rxe_mmap(struct ib_ucontext *context, struct vm_area_struct *vma)
 			continue;
 
 		/* Don't allow a mmap larger than the object. */
-		if (size > ip->info.size) {
-			pr_err("mmap region is larger than the object!\n");
-			spin_unlock_bh(&rxe->pending_lock);
-			ret = -EINVAL;
-			goto done;
-		}
+		if (size > ip->info.size)
+			break;
 
 		goto found_it;
 	}
@@ -126,7 +123,7 @@ found_it:
 
 	ret = remap_vmalloc_range(vma, ip->obj, 0);
 	if (ret) {
-		pr_err("rxe: err %d from remap_vmalloc_range\n", ret);
+		pr_info("rxe: err %d from remap_vmalloc_range\n", ret);
 		goto done;
 	}
 

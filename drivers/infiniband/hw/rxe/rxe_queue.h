@@ -1,6 +1,6 @@
 /*
- * Copyright (c) 2016 Mellanox Technologies Ltd. All rights reserved.
- * Copyright (c) 2015 System Fabric Works, Inc. All rights reserved.
+ * Copyright (c) 2009-2011 Mellanox Technologies Ltd. All rights reserved.
+ * Copyright (c) 2009-2011 System Fabric Works, Inc. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -35,26 +35,24 @@
 #define RXE_QUEUE_H
 
 /* implements a simple circular buffer that can optionally be
- * shared between user space and the kernel and can be resized
+   shared between user space and the kernel and can be resized
 
- * the requested element size is rounded up to a power of 2
- * and the number of elements in the buffer is also rounded
- * up to a power of 2. Since the queue is empty when the
- * producer and consumer indices match the maximum capacity
- * of the queue is one less than the number of element slots
- */
+   the requested element size is rounded up to a power of 2
+   and the number of elements in the buffer is also rounded
+   up to a power of 2. Since the queue is empty when the
+   producer and consumer indices match the maximum capacity
+   of the queue is one less than the number of element slots */
 
 /* this data structure is shared between user space and kernel
- * space for those cases where the queue is shared. It contains
- * the producer and consumer indices. Is also contains a copy
- * of the queue size parameters for user space to use but the
- * kernel must use the parameters in the rxe_queue struct
- * this MUST MATCH the corresponding librxe struct
- * for performance reasons arrange to have producer and consumer
- * pointers in separate cache lines
- * the kernel should always mask the indices to avoid accessing
- * memory outside of the data area
- */
+   space for those cases where the queue is shared. It contains
+   the producer and consumer indices. Is also contains a copy
+   of the queue size parameters for user space to use but the
+   kernel must use the parameters in the rxe_queue struct
+   this MUST MATCH the corresponding librxe struct
+   for performance reasons arrange to have producer and consumer
+   pointers in separate cache lines
+   the kernel should always mask the indices to avoid accessing
+   memory outside of the data area */
 struct rxe_queue_buf {
 	__u32			log2_elem_size;
 	__u32			index_mask;
@@ -78,7 +76,7 @@ struct rxe_queue {
 
 int do_mmap_info(struct rxe_dev *rxe,
 		 struct ib_udata *udata,
-		 bool is_req,
+		 int offset,
 		 struct ib_ucontext *context,
 		 struct rxe_queue_buf *buf,
 		 size_t buf_size,
@@ -93,9 +91,9 @@ int rxe_queue_resize(struct rxe_queue *q,
 		     unsigned int elem_size,
 		     struct ib_ucontext *context,
 		     struct ib_udata *udata,
-		     /* Protect producers while resizing queue */
+		     /* producer lock */
 		     spinlock_t *producer_lock,
-		     /* Protect consumers while resizing queue */
+		     /* consumer lock */
 		     spinlock_t *consumer_lock);
 
 void rxe_queue_cleanup(struct rxe_queue *queue);

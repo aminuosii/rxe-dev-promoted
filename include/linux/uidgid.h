@@ -109,12 +109,12 @@ static inline bool gid_lte(kgid_t left, kgid_t right)
 
 static inline bool uid_valid(kuid_t uid)
 {
-	return __kuid_val(uid) != (uid_t) -1;
+	return !uid_eq(uid, INVALID_UID);
 }
 
 static inline bool gid_valid(kgid_t gid)
 {
-	return __kgid_val(gid) != (gid_t) -1;
+	return !gid_eq(gid, INVALID_GID);
 }
 
 #ifdef CONFIG_USER_NS

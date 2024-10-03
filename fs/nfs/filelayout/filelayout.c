@@ -32,7 +32,6 @@
 #include <linux/nfs_fs.h>
 #include <linux/nfs_page.h>
 #include <linux/module.h>
-#include <linux/backing-dev.h>
 
 #include <linux/sunrpc/metrics.h>
 
@@ -202,7 +201,6 @@ static int filelayout_async_handle_error(struct rpc_task *task,
 			task->tk_status);
 		nfs4_mark_deviceid_unavailable(devid);
 		pnfs_error_mark_layout_for_return(inode, lseg);
-		pnfs_set_lo_fail(lseg);
 		rpc_wake_up(&tbl->slot_tbl_waitq);
 		/* fall through */
 	default:
@@ -260,8 +258,7 @@ filelayout_set_layoutcommit(struct nfs_pgio_header *hdr)
 	    hdr->res.verf->committed != NFS_DATA_SYNC)
 		return;
 
-	pnfs_set_layoutcommit(hdr->inode, hdr->lseg,
-			hdr->mds_offset + hdr->res.count);
+	pnfs_set_layoutcommit(hdr);
 	dprintk("%s inode %lu pls_end_pos %lu\n", __func__, hdr->inode->i_ino,
 		(unsigned long) NFS_I(hdr->inode)->layout->plh_lwb);
 }
@@ -376,7 +373,7 @@ static int filelayout_commit_done_cb(struct rpc_task *task,
 	}
 
 	if (data->verf.committed == NFS_UNSTABLE)
-		pnfs_set_layoutcommit(data->inode, data->lseg, data->lwb);
+		pnfs_commit_set_layoutcommit(data);
 
 	return 0;
 }
@@ -630,18 +627,23 @@ out_put:
 	goto out;
 }
 
-static void _filelayout_free_lseg(struct nfs4_filelayout_segment *fl)
+static void filelayout_free_fh_array(struct nfs4_filelayout_segment *fl)
 {
 	int i;
 
-	if (fl->fh_array) {
-		for (i = 0; i < fl->num_fh; i++) {
-			if (!fl->fh_array[i])
-				break;
-			kfree(fl->fh_array[i]);
-		}
-		kfree(fl->fh_array);
+	for (i = 0; i < fl->num_fh; i++) {
+		if (!fl->fh_array[i])
+			break;
+		kfree(fl->fh_array[i]);
 	}
+	kfree(fl->fh_array);
+	fl->fh_array = NULL;
+}
+
+static void
+_filelayout_free_lseg(struct nfs4_filelayout_segment *fl)
+{
+	filelayout_free_fh_array(fl);
 	kfree(fl);
 }
 
@@ -712,21 +714,21 @@ filelayout_decode_layout(struct pnfs_layout_hdr *flo,
 		/* Do we want to use a mempool here? */
 		fl->fh_array[i] = kmalloc(sizeof(struct nfs_fh), gfp_flags);
 		if (!fl->fh_array[i])
-			goto out_err;
+			goto out_err_free;
 
 		p = xdr_inline_decode(&stream, 4);
 		if (unlikely(!p))
-			goto out_err;
+			goto out_err_free;
 		fl->fh_array[i]->size = be32_to_cpup(p++);
 		if (sizeof(struct nfs_fh) < fl->fh_array[i]->size) {
 			printk(KERN_ERR "NFS: Too big fh %d received %d\n",
 			       i, fl->fh_array[i]->size);
-			goto out_err;
+			goto out_err_free;
 		}
 
 		p = xdr_inline_decode(&stream, fl->fh_array[i]->size);
 		if (unlikely(!p))
-			goto out_err;
+			goto out_err_free;
 		memcpy(fl->fh_array[i]->data, p, fl->fh_array[i]->size);
 		dprintk("DEBUG: %s: fh len %d\n", __func__,
 			fl->fh_array[i]->size);
@@ -735,6 +737,8 @@ filelayout_decode_layout(struct pnfs_layout_hdr *flo,
 	__free_page(scratch);
 	return 0;
 
+out_err_free:
+	filelayout_free_fh_array(fl);
 out_err:
 	__free_page(scratch);
 	return -EIO;
@@ -795,7 +799,7 @@ filelayout_alloc_commit_info(struct pnfs_layout_segment *lseg,
 		buckets[i].direct_verf.committed = NFS_INVALID_STABLE_HOW;
 	}
 
-	spin_lock(&cinfo->inode->i_lock);
+	spin_lock(cinfo->lock);
 	if (cinfo->ds->nbuckets >= size)
 		goto out;
 	for (i = 0; i < cinfo->ds->nbuckets; i++) {
@@ -811,7 +815,7 @@ filelayout_alloc_commit_info(struct pnfs_layout_segment *lseg,
 	swap(cinfo->ds->buckets, buckets);
 	cinfo->ds->nbuckets = size;
 out:
-	spin_unlock(&cinfo->inode->i_lock);
+	spin_unlock(cinfo->lock);
 	kfree(buckets);
 	return 0;
 }
@@ -884,20 +888,13 @@ static void
 filelayout_pg_init_read(struct nfs_pageio_descriptor *pgio,
 			struct nfs_page *req)
 {
-	if (!pgio->pg_lseg) {
+	if (!pgio->pg_lseg)
 		pgio->pg_lseg = pnfs_update_layout(pgio->pg_inode,
 					   req->wb_context,
 					   0,
 					   NFS4_MAX_UINT64,
 					   IOMODE_READ,
-					   false,
 					   GFP_KERNEL);
-		if (IS_ERR(pgio->pg_lseg)) {
-			pgio->pg_error = PTR_ERR(pgio->pg_lseg);
-			pgio->pg_lseg = NULL;
-			return;
-		}
-	}
 	/* If no lseg, fall back to read through mds */
 	if (pgio->pg_lseg == NULL)
 		nfs_pageio_reset_read_mds(pgio);
@@ -910,21 +907,13 @@ filelayout_pg_init_write(struct nfs_pageio_descriptor *pgio,
 	struct nfs_commit_info cinfo;
 	int status;
 
-	if (!pgio->pg_lseg) {
+	if (!pgio->pg_lseg)
 		pgio->pg_lseg = pnfs_update_layout(pgio->pg_inode,
 					   req->wb_context,
 					   0,
 					   NFS4_MAX_UINT64,
 					   IOMODE_RW,
-					   false,
 					   GFP_NOFS);
-		if (IS_ERR(pgio->pg_lseg)) {
-			pgio->pg_error = PTR_ERR(pgio->pg_lseg);
-			pgio->pg_lseg = NULL;
-			return;
-		}
-	}
-
 	/* If no lseg, fall back to write through mds */
 	if (pgio->pg_lseg == NULL)
 		goto out_mds;
@@ -973,7 +962,7 @@ filelayout_mark_request_commit(struct nfs_page *req,
 	u32 i, j;
 
 	if (fl->commit_through_mds) {
-		nfs_request_add_commit_list(req, cinfo);
+		nfs_request_add_commit_list(req, &cinfo->mds->list, cinfo);
 	} else {
 		/* Note that we are calling nfs4_fl_calc_j_index on each page
 		 * that ends up being committed to a data server.  An attractive
@@ -1097,7 +1086,7 @@ filelayout_alloc_deviceid_node(struct nfs_server *server,
 }
 
 static void
-filelayout_free_deviceid_node(struct nfs4_deviceid_node *d)
+filelayout_free_deveiceid_node(struct nfs4_deviceid_node *d)
 {
 	nfs4_fl_free_deviceid(container_of(d, struct nfs4_file_layout_dsaddr, id_node));
 }
@@ -1148,8 +1137,7 @@ static struct pnfs_layoutdriver_type filelayout_type = {
 	.read_pagelist		= filelayout_read_pagelist,
 	.write_pagelist		= filelayout_write_pagelist,
 	.alloc_deviceid_node	= filelayout_alloc_deviceid_node,
-	.free_deviceid_node	= filelayout_free_deviceid_node,
-	.sync			= pnfs_nfs_generic_sync,
+	.free_deviceid_node	= filelayout_free_deveiceid_node,
 };
 
 static int __init nfs4filelayout_init(void)

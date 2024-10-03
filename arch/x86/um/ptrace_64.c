@@ -11,7 +11,6 @@
 #define __FRAME_OFFSETS
 #include <asm/ptrace.h>
 #include <asm/uaccess.h>
-#include <asm/ptrace-abi.h>
 
 /*
  * determines which flags the user has access to.
@@ -222,14 +221,14 @@ int is_syscall(unsigned long addr)
 static int get_fpregs(struct user_i387_struct __user *buf, struct task_struct *child)
 {
 	int err, n, cpu = ((struct thread_info *) child->stack)->cpu;
-	struct user_i387_struct fpregs;
+	long fpregs[HOST_FP_SIZE];
 
-	err = save_i387_registers(userspace_pid[cpu],
-				  (unsigned long *) &fpregs);
+	BUG_ON(sizeof(*buf) != sizeof(fpregs));
+	err = save_fp_registers(userspace_pid[cpu], fpregs);
 	if (err)
 		return err;
 
-	n = copy_to_user(buf, &fpregs, sizeof(fpregs));
+	n = copy_to_user(buf, fpregs, sizeof(fpregs));
 	if (n > 0)
 		return -EFAULT;
 
@@ -239,14 +238,14 @@ static int get_fpregs(struct user_i387_struct __user *buf, struct task_struct *c
 static int set_fpregs(struct user_i387_struct __user *buf, struct task_struct *child)
 {
 	int n, cpu = ((struct thread_info *) child->stack)->cpu;
-	struct user_i387_struct fpregs;
+	long fpregs[HOST_FP_SIZE];
 
-	n = copy_from_user(&fpregs, buf, sizeof(fpregs));
+	BUG_ON(sizeof(*buf) != sizeof(fpregs));
+	n = copy_from_user(fpregs, buf, sizeof(fpregs));
 	if (n > 0)
 		return -EFAULT;
 
-	return restore_i387_registers(userspace_pid[cpu],
-				      (unsigned long *) &fpregs);
+	return restore_fp_registers(userspace_pid[cpu], fpregs);
 }
 
 long subarch_ptrace(struct task_struct *child, long request,

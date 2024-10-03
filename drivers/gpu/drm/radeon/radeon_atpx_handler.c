@@ -143,10 +143,7 @@ static int radeon_atpx_validate(struct radeon_atpx *atpx)
 {
 	/* make sure required functions are enabled */
 	/* dGPU power control is required */
-	if (atpx->functions.power_cntl == false) {
-		printk("ATPX dGPU power cntl not present, forcing\n");
-		atpx->functions.power_cntl = true;
-	}
+	atpx->functions.power_cntl = true;
 
 	if (atpx->functions.px_params) {
 		union acpi_object *info;
@@ -502,7 +499,7 @@ static int radeon_atpx_get_client_id(struct pci_dev *pdev)
 		return VGA_SWITCHEROO_DIS;
 }
 
-static const struct vga_switcheroo_handler radeon_atpx_handler = {
+static struct vga_switcheroo_handler radeon_atpx_handler = {
 	.switchto = radeon_atpx_switchto,
 	.power_state = radeon_atpx_power_state,
 	.init = radeon_atpx_init,
@@ -538,7 +535,7 @@ static bool radeon_atpx_detect(void)
 
 	if (has_atpx && vga_count == 2) {
 		acpi_get_name(radeon_atpx_priv.atpx.handle, ACPI_FULL_PATHNAME, &buffer);
-		printk(KERN_INFO "vga_switcheroo: detected switching method %s handle\n",
+		printk(KERN_INFO "VGA switcheroo: detected switching method %s handle\n",
 		       acpi_method_name);
 		radeon_atpx_priv.atpx_detected = true;
 		return true;
@@ -554,14 +551,13 @@ static bool radeon_atpx_detect(void)
 void radeon_register_atpx_handler(void)
 {
 	bool r;
-	enum vga_switcheroo_handler_flags_t handler_flags = 0;
 
 	/* detect if we have any ATPX + 2 VGA in the system */
 	r = radeon_atpx_detect();
 	if (!r)
 		return;
 
-	vga_switcheroo_register_handler(&radeon_atpx_handler, handler_flags);
+	vga_switcheroo_register_handler(&radeon_atpx_handler);
 }
 
 /**

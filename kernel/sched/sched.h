@@ -3,7 +3,6 @@
 #include <linux/sched/sysctl.h>
 #include <linux/sched/rt.h>
 #include <linux/sched/deadline.h>
-#include <linux/binfmts.h>
 #include <linux/mutex.h>
 #include <linux/spinlock.h>
 #include <linux/stop_machine.h>
@@ -27,14 +26,8 @@ extern __read_mostly int scheduler_running;
 extern unsigned long calc_load_update;
 extern atomic_long_t calc_load_tasks;
 
-extern void calc_global_load_tick(struct rq *this_rq);
 extern long calc_load_fold_active(struct rq *this_rq);
-
-#ifdef CONFIG_SMP
-extern void cpu_load_update_active(struct rq *this_rq);
-#else
-static inline void cpu_load_update_active(struct rq *this_rq) { }
-#endif
+extern void update_cpu_load_active(struct rq *this_rq);
 
 /*
  * Helpers for converting nanosecond timing to jiffy resolution
@@ -49,32 +42,25 @@ static inline void cpu_load_update_active(struct rq *this_rq) { }
  * and does not change the user-interface for setting shares/weights.
  *
  * We increase resolution only if we have enough bits to allow this increased
- * resolution (i.e. 64bit). The costs for increasing resolution when 32bit are
- * pretty high and the returns do not justify the increased costs.
- *
- * Really only required when CONFIG_FAIR_GROUP_SCHED is also set, but to
- * increase coverage and consistency always enable it on 64bit platforms.
+ * resolution (i.e. BITS_PER_LONG > 32). The costs for increasing resolution
+ * when BITS_PER_LONG <= 32 are pretty high and the returns do not justify the
+ * increased costs.
  */
-#ifdef CONFIG_64BIT
-# define NICE_0_LOAD_SHIFT	(SCHED_FIXEDPOINT_SHIFT + SCHED_FIXEDPOINT_SHIFT)
-# define scale_load(w)		((w) << SCHED_FIXEDPOINT_SHIFT)
-# define scale_load_down(w)	((w) >> SCHED_FIXEDPOINT_SHIFT)
+#if 0 /* BITS_PER_LONG > 32 -- currently broken: it increases power usage under light load  */
+# define SCHED_LOAD_RESOLUTION	10
+# define scale_load(w)		((w) << SCHED_LOAD_RESOLUTION)
+# define scale_load_down(w)	((w) >> SCHED_LOAD_RESOLUTION)
 #else
-# define NICE_0_LOAD_SHIFT	(SCHED_FIXEDPOINT_SHIFT)
+# define SCHED_LOAD_RESOLUTION	0
 # define scale_load(w)		(w)
 # define scale_load_down(w)	(w)
 #endif
 
-/*
- * Task weight (visible to users) and its load (invisible to users) have
- * independent resolution, but they should be well calibrated. We use
- * scale_load() and scale_load_down(w) to convert between them. The
- * following must be true:
- *
- *  scale_load(sched_prio_to_weight[USER_PRIO(NICE_TO_PRIO(0))]) == NICE_0_LOAD
- *
- */
-#define NICE_0_LOAD		(1L << NICE_0_LOAD_SHIFT)
+#define SCHED_LOAD_SHIFT	(10 + SCHED_LOAD_RESOLUTION)
+#define SCHED_LOAD_SCALE	(1L << SCHED_LOAD_SHIFT)
+
+#define NICE_0_LOAD		SCHED_LOAD_SCALE
+#define NICE_0_SHIFT		SCHED_LOAD_SHIFT
 
 /*
  * Single value that decides SCHED_DEADLINE internal math precision.
@@ -92,10 +78,6 @@ static inline void cpu_load_update_active(struct rq *this_rq) { }
  */
 #define RUNTIME_INF	((u64)~0ULL)
 
-static inline int idle_policy(int policy)
-{
-	return policy == SCHED_IDLE;
-}
 static inline int fair_policy(int policy)
 {
 	return policy == SCHED_NORMAL || policy == SCHED_BATCH;
@@ -110,11 +92,6 @@ static inline int dl_policy(int policy)
 {
 	return policy == SCHED_DEADLINE;
 }
-static inline bool valid_policy(int policy)
-{
-	return idle_policy(policy) || fair_policy(policy) ||
-		rt_policy(policy) || dl_policy(policy);
-}
 
 static inline int task_has_rt_policy(struct task_struct *p)
 {
@@ -124,6 +101,11 @@ static inline int task_has_rt_policy(struct task_struct *p)
 static inline int task_has_dl_policy(struct task_struct *p)
 {
 	return dl_policy(p->policy);
+}
+
+static inline bool dl_time_before(u64 a, u64 b)
+{
+	return (s64)(a - b) < 0;
 }
 
 /*
@@ -149,7 +131,6 @@ struct rt_bandwidth {
 	ktime_t			rt_period;
 	u64			rt_runtime;
 	struct hrtimer		rt_period_timer;
-	unsigned int		rt_period_active;
 };
 
 void __dl_clear_params(struct task_struct *p);
@@ -234,7 +215,7 @@ struct cfs_bandwidth {
 	s64 hierarchical_quota;
 	u64 runtime_expires;
 
-	int idle, period_active;
+	int idle, timer_active;
 	struct hrtimer period_timer, slack_timer;
 	struct list_head throttled_cfs_rq;
 
@@ -256,12 +237,8 @@ struct task_group {
 	unsigned long shares;
 
 #ifdef	CONFIG_SMP
-	/*
-	 * load_avg can be heavily contended at clock tick time, so put
-	 * it in its own cacheline separated from the fields above which
-	 * will also be accessed at each tick.
-	 */
-	atomic_long_t load_avg ____cacheline_aligned;
+	atomic_long_t load_avg;
+	atomic_t runnable_avg;
 #endif
 #endif
 
@@ -321,14 +298,15 @@ extern int tg_nop(struct task_group *tg, void *data);
 
 extern void free_fair_sched_group(struct task_group *tg);
 extern int alloc_fair_sched_group(struct task_group *tg, struct task_group *parent);
-extern void unregister_fair_sched_group(struct task_group *tg);
+extern void unregister_fair_sched_group(struct task_group *tg, int cpu);
 extern void init_tg_cfs_entry(struct task_group *tg, struct cfs_rq *cfs_rq,
 			struct sched_entity *se, int cpu,
 			struct sched_entity *parent);
 extern void init_cfs_bandwidth(struct cfs_bandwidth *cfs_b);
+extern int sched_group_set_shares(struct task_group *tg, unsigned long shares);
 
 extern void __refill_cfs_bandwidth_runtime(struct cfs_bandwidth *cfs_b);
-extern void start_cfs_bandwidth(struct cfs_bandwidth *cfs_b);
+extern void __start_cfs_bandwidth(struct cfs_bandwidth *cfs_b, bool force);
 extern void unthrottle_cfs_rq(struct cfs_rq *cfs_rq);
 
 extern void free_rt_sched_group(struct task_group *tg);
@@ -347,15 +325,7 @@ extern void sched_move_task(struct task_struct *tsk);
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
 extern int sched_group_set_shares(struct task_group *tg, unsigned long shares);
-
-#ifdef CONFIG_SMP
-extern void set_task_rq_fair(struct sched_entity *se,
-			     struct cfs_rq *prev, struct cfs_rq *next);
-#else /* !CONFIG_SMP */
-static inline void set_task_rq_fair(struct sched_entity *se,
-			     struct cfs_rq *prev, struct cfs_rq *next) { }
-#endif /* CONFIG_SMP */
-#endif /* CONFIG_FAIR_GROUP_SCHED */
+#endif
 
 #else /* CONFIG_CGROUP_SCHED */
 
@@ -389,20 +359,27 @@ struct cfs_rq {
 
 #ifdef CONFIG_SMP
 	/*
-	 * CFS load tracking
+	 * CFS Load tracking
+	 * Under CFS, load is tracked on a per-entity basis and aggregated up.
+	 * This allows for the description of both thread and group usage (in
+	 * the FAIR_GROUP_SCHED case).
+	 * runnable_load_avg is the sum of the load_avg_contrib of the
+	 * sched_entities on the rq.
+	 * blocked_load_avg is similar to runnable_load_avg except that its
+	 * the blocked sched_entities on the rq.
+	 * utilization_load_avg is the sum of the average running time of the
+	 * sched_entities on the rq.
 	 */
-	struct sched_avg avg;
-	u64 runnable_load_sum;
-	unsigned long runnable_load_avg;
-#ifdef CONFIG_FAIR_GROUP_SCHED
-	unsigned long tg_load_avg_contrib;
-#endif
-	atomic_long_t removed_load_avg, removed_util_avg;
-#ifndef CONFIG_64BIT
-	u64 load_last_update_time_copy;
-#endif
+	unsigned long runnable_load_avg, blocked_load_avg, utilization_load_avg;
+	atomic64_t decay_counter;
+	u64 last_decay;
+	atomic_long_t removed_load;
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
+	/* Required to track per-cpu representation of a task_group */
+	u32 tg_runnable_contrib;
+	unsigned long tg_load_contrib;
+
 	/*
 	 *   h_load = weight * f(tg)
 	 *
@@ -457,7 +434,6 @@ static inline int rt_bandwidth_enabled(void)
 struct rt_rq {
 	struct rt_prio_array active;
 	unsigned int rt_nr_running;
-	unsigned int rr_nr_running;
 #if defined CONFIG_SMP || defined CONFIG_RT_GROUP_SCHED
 	struct {
 		int curr; /* highest queued rt task prio */
@@ -592,13 +568,11 @@ struct rq {
 #endif
 	#define CPU_LOAD_IDX_MAX 5
 	unsigned long cpu_load[CPU_LOAD_IDX_MAX];
-#ifdef CONFIG_NO_HZ_COMMON
-#ifdef CONFIG_SMP
 	unsigned long last_load_update_tick;
-#endif /* CONFIG_SMP */
+#ifdef CONFIG_NO_HZ_COMMON
 	u64 nohz_stamp;
 	unsigned long nohz_flags;
-#endif /* CONFIG_NO_HZ_COMMON */
+#endif
 #ifdef CONFIG_NO_HZ_FULL
 	unsigned long last_sched_tick;
 #endif
@@ -614,6 +588,8 @@ struct rq {
 #ifdef CONFIG_FAIR_GROUP_SCHED
 	/* list of leaf cfs_rq on this cpu: */
 	struct list_head leaf_cfs_rq_list;
+
+	struct sched_avg avg;
 #endif /* CONFIG_FAIR_GROUP_SCHED */
 
 	/*
@@ -641,10 +617,9 @@ struct rq {
 	unsigned long cpu_capacity;
 	unsigned long cpu_capacity_orig;
 
-	struct callback_head *balance_callback;
-
 	unsigned char idle_balance;
 	/* For active balancing */
+	int post_schedule;
 	int active_balance;
 	int push_cpu;
 	struct cpu_stop_work active_balance_work;
@@ -732,7 +707,7 @@ DECLARE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues);
 
 static inline u64 __rq_clock_broken(struct rq *rq)
 {
-	return READ_ONCE(rq->clock);
+	return ACCESS_ONCE(rq->clock);
 }
 
 static inline u64 rq_clock(struct rq *rq)
@@ -784,21 +759,6 @@ extern int migrate_swap(struct task_struct *, struct task_struct *);
 #endif /* CONFIG_NUMA_BALANCING */
 
 #ifdef CONFIG_SMP
-
-static inline void
-queue_balance_callback(struct rq *rq,
-		       struct callback_head *head,
-		       void (*func)(struct rq *rq))
-{
-	lockdep_assert_held(&rq->lock);
-
-	if (unlikely(head->next))
-		return;
-
-	head->func = (void (*)(struct callback_head *))func;
-	head->next = rq->balance_callback;
-	rq->balance_callback = head;
-}
 
 extern void sched_ttwu_pending(void);
 
@@ -863,7 +823,7 @@ DECLARE_PER_CPU(struct sched_domain *, sd_asym);
 struct sched_group_capacity {
 	atomic_t ref;
 	/*
-	 * CPU capacity of this group, SCHED_CAPACITY_SCALE being max capacity
+	 * CPU capacity of this group, SCHED_LOAD_SCALE being max capacity
 	 * for a single CPU.
 	 */
 	unsigned int capacity;
@@ -919,18 +879,6 @@ static inline unsigned int group_first_cpu(struct sched_group *group)
 
 extern int group_balance_cpu(struct sched_group *sg);
 
-#if defined(CONFIG_SCHED_DEBUG) && defined(CONFIG_SYSCTL)
-void register_sched_domain_sysctl(void);
-void unregister_sched_domain_sysctl(void);
-#else
-static inline void register_sched_domain_sysctl(void)
-{
-}
-static inline void unregister_sched_domain_sysctl(void)
-{
-}
-#endif
-
 #else
 
 static inline void sched_ttwu_pending(void) { }
@@ -968,7 +916,6 @@ static inline void set_task_rq(struct task_struct *p, unsigned int cpu)
 #endif
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
-	set_task_rq_fair(&p->se, p->se.cfs_rq, tg->cfs_rq[cpu]);
 	p->se.cfs_rq = tg->cfs_rq[cpu];
 	p->se.parent = tg->se[cpu];
 #endif
@@ -1043,8 +990,17 @@ extern struct static_key sched_feat_keys[__SCHED_FEAT_NR];
 #define sched_feat(x) (sysctl_sched_features & (1UL << __SCHED_FEAT_##x))
 #endif /* SCHED_DEBUG && HAVE_JUMP_LABEL */
 
-extern struct static_key_false sched_numa_balancing;
-extern struct static_key_false sched_schedstats;
+#ifdef CONFIG_NUMA_BALANCING
+#define sched_feat_numa(x) sched_feat(x)
+#ifdef CONFIG_SCHED_DEBUG
+#define numabalancing_enabled sched_feat_numa(NUMA)
+#else
+extern bool numabalancing_enabled;
+#endif /* CONFIG_SCHED_DEBUG */
+#else
+#define sched_feat_numa(x) (0)
+#define numabalancing_enabled (0)
+#endif /* CONFIG_NUMA_BALANCING */
 
 static inline u64 global_rt_period(void)
 {
@@ -1086,6 +1042,9 @@ static inline int task_on_rq_migrating(struct task_struct *p)
 #ifndef prepare_arch_switch
 # define prepare_arch_switch(next)	do { } while (0)
 #endif
+#ifndef finish_arch_switch
+# define finish_arch_switch(prev)	do { } while (0)
+#endif
 #ifndef finish_arch_post_lock_switch
 # define finish_arch_post_lock_switch()	do { } while (0)
 #endif
@@ -1109,13 +1068,9 @@ static inline void finish_lock_switch(struct rq *rq, struct task_struct *prev)
 	 * After ->on_cpu is cleared, the task can be moved to a different CPU.
 	 * We must ensure this doesn't happen until the switch is completely
 	 * finished.
-	 *
-	 * In particular, the load of prev->state in finish_task_switch() must
-	 * happen before this.
-	 *
-	 * Pairs with the smp_cond_acquire() in try_to_wake_up().
 	 */
-	smp_store_release(&prev->on_cpu, 0);
+	smp_wmb();
+	prev->on_cpu = 0;
 #endif
 #ifdef CONFIG_DEBUG_SPINLOCK
 	/* this is a valid case when another task releases the spinlock */
@@ -1150,43 +1105,57 @@ static inline void finish_lock_switch(struct rq *rq, struct task_struct *prev)
 #define WEIGHT_IDLEPRIO                3
 #define WMULT_IDLEPRIO         1431655765
 
-extern const int sched_prio_to_weight[40];
-extern const u32 sched_prio_to_wmult[40];
+/*
+ * Nice levels are multiplicative, with a gentle 10% change for every
+ * nice level changed. I.e. when a CPU-bound task goes from nice 0 to
+ * nice 1, it will get ~10% less CPU time than another CPU-bound task
+ * that remained on nice 0.
+ *
+ * The "10% effect" is relative and cumulative: from _any_ nice level,
+ * if you go up 1 level, it's -10% CPU usage, if you go down 1 level
+ * it's +10% CPU usage. (to achieve that we use a multiplier of 1.25.
+ * If a task goes up by ~10% and another task goes down by ~10% then
+ * the relative distance between them is ~25%.)
+ */
+static const int prio_to_weight[40] = {
+ /* -20 */     88761,     71755,     56483,     46273,     36291,
+ /* -15 */     29154,     23254,     18705,     14949,     11916,
+ /* -10 */      9548,      7620,      6100,      4904,      3906,
+ /*  -5 */      3121,      2501,      1991,      1586,      1277,
+ /*   0 */      1024,       820,       655,       526,       423,
+ /*   5 */       335,       272,       215,       172,       137,
+ /*  10 */       110,        87,        70,        56,        45,
+ /*  15 */        36,        29,        23,        18,        15,
+};
 
 /*
- * {de,en}queue flags:
+ * Inverse (2^32/x) values of the prio_to_weight[] array, precalculated.
  *
- * DEQUEUE_SLEEP  - task is no longer runnable
- * ENQUEUE_WAKEUP - task just became runnable
- *
- * SAVE/RESTORE - an otherwise spurious dequeue/enqueue, done to ensure tasks
- *                are in a known state which allows modification. Such pairs
- *                should preserve as much state as possible.
- *
- * MOVE - paired with SAVE/RESTORE, explicitly does not preserve the location
- *        in the runqueue.
- *
- * ENQUEUE_HEAD      - place at front of runqueue (tail if not specified)
- * ENQUEUE_REPLENISH - CBS (replenish runtime and postpone deadline)
- * ENQUEUE_MIGRATED  - the task was migrated during wakeup
- *
+ * In cases where the weight does not change often, we can use the
+ * precalculated inverse to speed up arithmetics by turning divisions
+ * into multiplications:
  */
+static const u32 prio_to_wmult[40] = {
+ /* -20 */     48388,     59856,     76040,     92818,    118348,
+ /* -15 */    147320,    184698,    229616,    287308,    360437,
+ /* -10 */    449829,    563644,    704093,    875809,   1099582,
+ /*  -5 */   1376151,   1717300,   2157191,   2708050,   3363326,
+ /*   0 */   4194304,   5237765,   6557202,   8165337,  10153587,
+ /*   5 */  12820798,  15790321,  19976592,  24970740,  31350126,
+ /*  10 */  39045157,  49367440,  61356676,  76695844,  95443717,
+ /*  15 */ 119304647, 148102320, 186737708, 238609294, 286331153,
+};
 
-#define DEQUEUE_SLEEP		0x01
-#define DEQUEUE_SAVE		0x02 /* matches ENQUEUE_RESTORE */
-#define DEQUEUE_MOVE		0x04 /* matches ENQUEUE_MOVE */
-
-#define ENQUEUE_WAKEUP		0x01
-#define ENQUEUE_RESTORE		0x02
-#define ENQUEUE_MOVE		0x04
-
-#define ENQUEUE_HEAD		0x08
-#define ENQUEUE_REPLENISH	0x10
+#define ENQUEUE_WAKEUP		1
+#define ENQUEUE_HEAD		2
 #ifdef CONFIG_SMP
-#define ENQUEUE_MIGRATED	0x20
+#define ENQUEUE_WAKING		4	/* sched_class::task_waking was called */
 #else
-#define ENQUEUE_MIGRATED	0x00
+#define ENQUEUE_WAKING		0
 #endif
+#define ENQUEUE_REPLENISH	8
+
+#define DEQUEUE_SLEEP		1
 
 #define RETRY_TASK		((void *)-1UL)
 
@@ -1209,14 +1178,15 @@ struct sched_class {
 	 * tasks.
 	 */
 	struct task_struct * (*pick_next_task) (struct rq *rq,
-						struct task_struct *prev,
-						struct pin_cookie cookie);
+						struct task_struct *prev);
 	void (*put_prev_task) (struct rq *rq, struct task_struct *p);
 
 #ifdef CONFIG_SMP
 	int  (*select_task_rq)(struct task_struct *p, int task_cpu, int sd_flag, int flags);
-	void (*migrate_task_rq)(struct task_struct *p);
+	void (*migrate_task_rq)(struct task_struct *p, int next_cpu);
 
+	void (*post_schedule) (struct rq *this_rq);
+	void (*task_waking) (struct task_struct *task);
 	void (*task_woken) (struct rq *this_rq, struct task_struct *task);
 
 	void (*set_cpus_allowed)(struct task_struct *p,
@@ -1247,7 +1217,7 @@ struct sched_class {
 	void (*update_curr) (struct rq *rq);
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
-	void (*task_move_group) (struct task_struct *p);
+	void (*task_move_group) (struct task_struct *p, int on_rq);
 #endif
 };
 
@@ -1273,7 +1243,13 @@ extern void update_group_capacity(struct sched_domain *sd, int cpu);
 
 extern void trigger_load_balance(struct rq *rq);
 
-extern void set_cpus_allowed_common(struct task_struct *p, const struct cpumask *new_mask);
+extern void idle_enter_fair(struct rq *this_rq);
+extern void idle_exit_fair(struct rq *this_rq);
+
+#else
+
+static inline void idle_enter_fair(struct rq *rq) { }
+static inline void idle_exit_fair(struct rq *rq) { }
 
 #endif
 
@@ -1308,6 +1284,7 @@ extern void update_max_interval(void);
 extern void init_sched_dl_class(void);
 extern void init_sched_rt_class(void);
 extern void init_sched_fair_class(void);
+extern void init_sched_dl_class(void);
 
 extern void resched_curr(struct rq *rq);
 extern void resched_cpu(int cpu);
@@ -1321,37 +1298,9 @@ extern void init_dl_task_timer(struct sched_dl_entity *dl_se);
 
 unsigned long to_ratio(u64 period, u64 runtime);
 
-extern void init_entity_runnable_average(struct sched_entity *se);
-extern void post_init_entity_util_avg(struct sched_entity *se);
+extern void update_idle_cpu_load(struct rq *this_rq);
 
-#ifdef CONFIG_NO_HZ_FULL
-extern bool sched_can_stop_tick(struct rq *rq);
-
-/*
- * Tick may be needed by tasks in the runqueue depending on their policy and
- * requirements. If tick is needed, lets send the target an IPI to kick it out of
- * nohz mode if necessary.
- */
-static inline void sched_update_tick_dependency(struct rq *rq)
-{
-	int cpu;
-
-	if (!tick_nohz_full_enabled())
-		return;
-
-	cpu = cpu_of(rq);
-
-	if (!tick_nohz_full_cpu(cpu))
-		return;
-
-	if (sched_can_stop_tick(rq))
-		tick_nohz_dep_clear_cpu(cpu, TICK_DEP_BIT_SCHED);
-	else
-		tick_nohz_dep_set_cpu(cpu, TICK_DEP_BIT_SCHED);
-}
-#else
-static inline void sched_update_tick_dependency(struct rq *rq) { }
-#endif
+extern void init_task_runnable_average(struct task_struct *p);
 
 static inline void add_nr_running(struct rq *rq, unsigned count)
 {
@@ -1364,16 +1313,26 @@ static inline void add_nr_running(struct rq *rq, unsigned count)
 		if (!rq->rd->overload)
 			rq->rd->overload = true;
 #endif
-	}
 
-	sched_update_tick_dependency(rq);
+#ifdef CONFIG_NO_HZ_FULL
+		if (tick_nohz_full_cpu(rq->cpu)) {
+			/*
+			 * Tick is needed if more than one task runs on a CPU.
+			 * Send the target an IPI to kick it out of nohz mode.
+			 *
+			 * We assume that IPI implies full memory barrier and the
+			 * new value of rq->nr_running is visible on reception
+			 * from the target.
+			 */
+			tick_nohz_full_kick_cpu(rq->cpu);
+		}
+#endif
+	}
 }
 
 static inline void sub_nr_running(struct rq *rq, unsigned count)
 {
 	rq->nr_running -= count;
-	/* Check if we still need preemption */
-	sched_update_tick_dependency(rq);
 }
 
 static inline void rq_last_tick_reset(struct rq *rq)
@@ -1437,17 +1396,6 @@ unsigned long arch_scale_freq_capacity(struct sched_domain *sd, int cpu)
 }
 #endif
 
-#ifndef arch_scale_cpu_capacity
-static __always_inline
-unsigned long arch_scale_cpu_capacity(struct sched_domain *sd, int cpu)
-{
-	if (sd && (sd->flags & SD_SHARE_CPUCAPACITY) && (sd->span_weight > 1))
-		return sd->smt_gain / sd->span_weight;
-
-	return SCHED_CAPACITY_SCALE;
-}
-#endif
-
 static inline void sched_rt_avg_update(struct rq *rq, u64 rt_delta)
 {
 	rq->rt_avg += rt_delta * arch_scale_freq_capacity(NULL, cpu_of(rq));
@@ -1458,32 +1406,82 @@ static inline void sched_rt_avg_update(struct rq *rq, u64 rt_delta) { }
 static inline void sched_avg_update(struct rq *rq) { }
 #endif
 
-struct rq_flags {
-	unsigned long flags;
-	struct pin_cookie cookie;
-};
+extern void start_bandwidth_timer(struct hrtimer *period_timer, ktime_t period);
 
-struct rq *__task_rq_lock(struct task_struct *p, struct rq_flags *rf)
-	__acquires(rq->lock);
-struct rq *task_rq_lock(struct task_struct *p, struct rq_flags *rf)
+/*
+ * __task_rq_lock - lock the rq @p resides on.
+ */
+static inline struct rq *__task_rq_lock(struct task_struct *p)
+	__acquires(rq->lock)
+{
+	struct rq *rq;
+
+	lockdep_assert_held(&p->pi_lock);
+
+	for (;;) {
+		rq = task_rq(p);
+		raw_spin_lock(&rq->lock);
+		if (likely(rq == task_rq(p) && !task_on_rq_migrating(p)))
+			return rq;
+		raw_spin_unlock(&rq->lock);
+
+		while (unlikely(task_on_rq_migrating(p)))
+			cpu_relax();
+	}
+}
+
+/*
+ * task_rq_lock - lock p->pi_lock and lock the rq @p resides on.
+ */
+static inline struct rq *task_rq_lock(struct task_struct *p, unsigned long *flags)
 	__acquires(p->pi_lock)
-	__acquires(rq->lock);
+	__acquires(rq->lock)
+{
+	struct rq *rq;
 
-static inline void __task_rq_unlock(struct rq *rq, struct rq_flags *rf)
+	for (;;) {
+		raw_spin_lock_irqsave(&p->pi_lock, *flags);
+		rq = task_rq(p);
+		raw_spin_lock(&rq->lock);
+		/*
+		 *	move_queued_task()		task_rq_lock()
+		 *
+		 *	ACQUIRE (rq->lock)
+		 *	[S] ->on_rq = MIGRATING		[L] rq = task_rq()
+		 *	WMB (__set_task_cpu())		ACQUIRE (rq->lock);
+		 *	[S] ->cpu = new_cpu		[L] task_rq()
+		 *					[L] ->on_rq
+		 *	RELEASE (rq->lock)
+		 *
+		 * If we observe the old cpu in task_rq_lock, the acquire of
+		 * the old rq->lock will fully serialize against the stores.
+		 *
+		 * If we observe the new cpu in task_rq_lock, the acquire will
+		 * pair with the WMB to ensure we must then also see migrating.
+		 */
+		if (likely(rq == task_rq(p) && !task_on_rq_migrating(p)))
+			return rq;
+		raw_spin_unlock(&rq->lock);
+		raw_spin_unlock_irqrestore(&p->pi_lock, *flags);
+
+		while (unlikely(task_on_rq_migrating(p)))
+			cpu_relax();
+	}
+}
+
+static inline void __task_rq_unlock(struct rq *rq)
 	__releases(rq->lock)
 {
-	lockdep_unpin_lock(&rq->lock, rf->cookie);
 	raw_spin_unlock(&rq->lock);
 }
 
 static inline void
-task_rq_unlock(struct rq *rq, struct task_struct *p, struct rq_flags *rf)
+task_rq_unlock(struct rq *rq, struct task_struct *p, unsigned long *flags)
 	__releases(rq->lock)
 	__releases(p->pi_lock)
 {
-	lockdep_unpin_lock(&rq->lock, rf->cookie);
 	raw_spin_unlock(&rq->lock);
-	raw_spin_unlock_irqrestore(&p->pi_lock, rf->flags);
+	raw_spin_unlock_irqrestore(&p->pi_lock, *flags);
 }
 
 #ifdef CONFIG_SMP
@@ -1668,22 +1666,9 @@ static inline void double_rq_unlock(struct rq *rq1, struct rq *rq2)
 
 extern struct sched_entity *__pick_first_entity(struct cfs_rq *cfs_rq);
 extern struct sched_entity *__pick_last_entity(struct cfs_rq *cfs_rq);
-
-#ifdef	CONFIG_SCHED_DEBUG
 extern void print_cfs_stats(struct seq_file *m, int cpu);
 extern void print_rt_stats(struct seq_file *m, int cpu);
 extern void print_dl_stats(struct seq_file *m, int cpu);
-extern void
-print_cfs_rq(struct seq_file *m, int cpu, struct cfs_rq *cfs_rq);
-
-#ifdef CONFIG_NUMA_BALANCING
-extern void
-show_numa_stats(struct task_struct *p, struct seq_file *m);
-extern void
-print_numa_stats(struct seq_file *m, int node, unsigned long tsf,
-	unsigned long tpf, unsigned long gsf, unsigned long gpf);
-#endif /* CONFIG_NUMA_BALANCING */
-#endif /* CONFIG_SCHED_DEBUG */
 
 extern void init_cfs_rq(struct cfs_rq *cfs_rq);
 extern void init_rt_rq(struct rt_rq *rt_rq);
@@ -1699,10 +1684,6 @@ enum rq_nohz_flag_bits {
 };
 
 #define nohz_flags(cpu)	(&cpu_rq(cpu)->nohz_flags)
-
-extern void nohz_balance_exit_idle(unsigned int cpu);
-#else
-static inline void nohz_balance_exit_idle(unsigned int cpu) { }
 #endif
 
 #ifdef CONFIG_IRQ_TIME_ACCOUNTING
@@ -1753,72 +1734,3 @@ static inline u64 irq_time_read(int cpu)
 }
 #endif /* CONFIG_64BIT */
 #endif /* CONFIG_IRQ_TIME_ACCOUNTING */
-
-#ifdef CONFIG_CPU_FREQ
-DECLARE_PER_CPU(struct update_util_data *, cpufreq_update_util_data);
-
-/**
- * cpufreq_update_util - Take a note about CPU utilization changes.
- * @time: Current time.
- * @util: Current utilization.
- * @max: Utilization ceiling.
- *
- * This function is called by the scheduler on every invocation of
- * update_load_avg() on the CPU whose utilization is being updated.
- *
- * It can only be called from RCU-sched read-side critical sections.
- */
-static inline void cpufreq_update_util(u64 time, unsigned long util, unsigned long max)
-{
-       struct update_util_data *data;
-
-       data = rcu_dereference_sched(*this_cpu_ptr(&cpufreq_update_util_data));
-       if (data)
-               data->func(data, time, util, max);
-}
-
-/**
- * cpufreq_trigger_update - Trigger CPU performance state evaluation if needed.
- * @time: Current time.
- *
- * The way cpufreq is currently arranged requires it to evaluate the CPU
- * performance state (frequency/voltage) on a regular basis to prevent it from
- * being stuck in a completely inadequate performance level for too long.
- * That is not guaranteed to happen if the updates are only triggered from CFS,
- * though, because they may not be coming in if RT or deadline tasks are active
- * all the time (or there are RT and DL tasks only).
- *
- * As a workaround for that issue, this function is called by the RT and DL
- * sched classes to trigger extra cpufreq updates to prevent it from stalling,
- * but that really is a band-aid.  Going forward it should be replaced with
- * solutions targeted more specifically at RT and DL tasks.
- */
-static inline void cpufreq_trigger_update(u64 time)
-{
-	cpufreq_update_util(time, ULONG_MAX, 0);
-}
-#else
-static inline void cpufreq_update_util(u64 time, unsigned long util, unsigned long max) {}
-static inline void cpufreq_trigger_update(u64 time) {}
-#endif /* CONFIG_CPU_FREQ */
-
-#ifdef arch_scale_freq_capacity
-#ifndef arch_scale_freq_invariant
-#define arch_scale_freq_invariant()	(true)
-#endif
-#else /* arch_scale_freq_capacity */
-#define arch_scale_freq_invariant()	(false)
-#endif
-
-static inline void account_reset_rq(struct rq *rq)
-{
-#ifdef CONFIG_IRQ_TIME_ACCOUNTING
-	rq->prev_irq_time = 0;
-#endif
-#ifdef CONFIG_PARAVIRT
-	rq->prev_steal_time = 0;
-#endif
-#ifdef CONFIG_PARAVIRT_TIME_ACCOUNTING
-	rq->prev_steal_time_rq = 0;
-#endif
-}

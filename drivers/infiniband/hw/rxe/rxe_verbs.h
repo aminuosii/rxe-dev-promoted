@@ -1,6 +1,6 @@
 /*
- * Copyright (c) 2016 Mellanox Technologies Ltd. All rights reserved.
- * Copyright (c) 2015 System Fabric Works, Inc. All rights reserved.
+ * Copyright (c) 2009-2011 Mellanox Technologies Ltd. All rights reserved.
+ * Copyright (c) 2009-2011 System Fabric Works, Inc. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -35,7 +35,7 @@
 #define RXE_VERBS_H
 
 #include <linux/interrupt.h>
-#include <rdma/rdma_user_rxe.h>
+#include <rdma/ib_rxe.h>
 #include "rxe_pool.h"
 #include "rxe_task.h"
 
@@ -86,8 +86,9 @@ struct rxe_cq {
 	struct rxe_pool_entry	pelem;
 	struct ib_cq		ibcq;
 	struct rxe_queue	*queue;
-	spinlock_t		cq_lock;
+	spinlock_t		cq_lock; /* cq lock */
 	u8			notify;
+	u8			special;
 	int			is_user;
 	struct tasklet_struct	comp_task;
 };
@@ -104,15 +105,17 @@ struct rxe_sq {
 	int			max_wr;
 	int			max_sge;
 	int			max_inline;
-	spinlock_t		sq_lock; /* guard queue */
+	struct ib_wc		next_wc;
+	spinlock_t		sq_lock; /* sq lock */
 	struct rxe_queue	*queue;
 };
 
 struct rxe_rq {
 	int			max_wr;
 	int			max_sge;
-	spinlock_t		producer_lock; /* guard queue producer */
-	spinlock_t		consumer_lock; /* guard queue consumer */
+	struct ib_wc		next_wc;
+	spinlock_t		producer_lock; /* producer lock */
+	spinlock_t		consumer_lock; /* consumer lock */
 	struct rxe_queue	*queue;
 };
 
@@ -120,8 +123,13 @@ struct rxe_srq {
 	struct rxe_pool_entry	pelem;
 	struct ib_srq		ibsrq;
 	struct rxe_pd		*pd;
+	struct rxe_cq		*cq;
 	struct rxe_rq		rq;
 	u32			srq_num;
+
+	void			(*event_handler)(
+					struct ib_event *, void *);
+	void			*context;
 
 	int			limit;
 	int			error;
@@ -218,8 +226,7 @@ struct rxe_resp_info {
 	} srq_wqe;
 
 	/* Responder resources. It's a circular list where the oldest
-	 * resource is dropped first.
-	 */
+	 * resource is dropped first. */
 	struct resp_res		*resources;
 	unsigned int		res_head;
 	unsigned int		res_tail;
@@ -250,9 +257,10 @@ struct rxe_qp {
 	struct rxe_av		pri_av;
 	struct rxe_av		alt_av;
 
-	/* list of mcast groups qp has joined (for cleanup) */
+	/* list of mcast groups qp has joined
+	   (for cleanup) */
 	struct list_head	grp_list;
-	spinlock_t		grp_lock; /* guard grp_list */
+	spinlock_t		grp_lock; /* grp lock */
 
 	struct sk_buff_head	req_pkts;
 	struct sk_buff_head	resp_pkts;
@@ -262,6 +270,8 @@ struct rxe_qp {
 	struct rxe_comp_info	comp;
 	struct rxe_resp_info	resp;
 
+	struct ib_udata		*udata;
+
 	atomic_t		ssn;
 	atomic_t		skb_out;
 	int			need_req_skb;
@@ -269,15 +279,14 @@ struct rxe_qp {
 	/* Timer for retranmitting packet when ACKs have been lost. RC
 	 * only. The requester sets it when it is not already
 	 * started. The responder resets it whenever an ack is
-	 * received.
-	 */
+	 * received. */
 	struct timer_list retrans_timer;
 	u64 qp_timeout_jiffies;
 
 	/* Timer for handling RNR NAKS. */
 	struct timer_list rnr_nak_timer;
 
-	spinlock_t		state_lock; /* guard requester and completer */
+	spinlock_t		state_lock; /* state lock */
 };
 
 enum rxe_mem_state {
@@ -295,21 +304,17 @@ enum rxe_mem_type {
 	RXE_MEM_TYPE_MW,
 };
 
-#define RXE_BUF_PER_MAP		(PAGE_SIZE / sizeof(struct rxe_phys_buf))
-
-struct rxe_phys_buf {
-	u64      addr;
-	u64      size;
-};
+#define RXE_BUF_PER_MAP		(PAGE_SIZE/sizeof(struct ib_phys_buf))
 
 struct rxe_map {
-	struct rxe_phys_buf	buf[RXE_BUF_PER_MAP];
+	struct ib_phys_buf	buf[RXE_BUF_PER_MAP];
 };
 
 struct rxe_mem {
 	struct rxe_pool_entry	pelem;
 	union {
 		struct ib_mr		ibmr;
+		struct ib_fmr		ibfmr;
 		struct ib_mw		ibmw;
 	};
 
@@ -333,7 +338,6 @@ struct rxe_mem {
 	int			map_mask;
 
 	u32			num_buf;
-	u32			nbuf;
 
 	u32			max_buf;
 	u32			num_map;
@@ -341,14 +345,19 @@ struct rxe_mem {
 	struct rxe_map		**map;
 };
 
+struct rxe_fast_reg_page_list {
+	struct ib_fast_reg_page_list	ibfrpl;
+};
+
 struct rxe_mc_grp {
 	struct rxe_pool_entry	pelem;
-	spinlock_t		mcg_lock; /* guard group */
+	spinlock_t		mcg_lock; /* mcg lock */
 	struct rxe_dev		*rxe;
 	struct list_head	qp_list;
 	union ib_gid		mgid;
 	int			num_qp;
 	u32			qkey;
+	u16			mlid;
 	u16			pkey;
 };
 
@@ -363,25 +372,31 @@ struct rxe_mc_elem {
 struct rxe_port {
 	struct ib_port_attr	attr;
 	u16			*pkey_tbl;
-	__be64			port_guid;
+	__be64			*guid_tbl;
 	__be64			subnet_prefix;
-	spinlock_t		port_lock; /* guard port */
+
+	/* rate control */
+	/* TODO */
+
+	spinlock_t		port_lock; /* port lock */
+
 	unsigned int		mtu_cap;
+
 	/* special QPs */
 	u32			qp_smi_index;
 	u32			qp_gsi_index;
 };
 
-/* callbacks from rdma_rxe to network interface layer */
+/* callbacks from ib_rxe to network interface layer */
 struct rxe_ifc_ops {
 	void (*release)(struct rxe_dev *rxe);
 	__be64 (*node_guid)(struct rxe_dev *rxe);
-	__be64 (*port_guid)(struct rxe_dev *rxe);
+	__be64 (*port_guid)(struct rxe_dev *rxe, unsigned int port_num);
 	struct device *(*dma_device)(struct rxe_dev *rxe);
 	int (*mcast_add)(struct rxe_dev *rxe, union ib_gid *mgid);
 	int (*mcast_delete)(struct rxe_dev *rxe, union ib_gid *mgid);
 	int (*prepare)(struct rxe_dev *rxe, struct rxe_pkt_info *pkt,
-		       struct sk_buff *skb, u32 *crc);
+		       struct sk_buff *skb);
 	int (*send)(struct rxe_dev *rxe, struct rxe_pkt_info *pkt,
 		    struct sk_buff *skb);
 	int (*loopback)(struct sk_buff *skb);
@@ -398,11 +413,13 @@ struct rxe_dev {
 	int			max_ucontext;
 	int			max_inline_data;
 	struct kref		ref_cnt;
-	struct mutex	usdev_lock;
 
 	struct rxe_ifc_ops	*ifc_ops;
 
 	struct net_device	*ndev;
+
+
+	atomic_t		ind;
 
 	int			xmit_errors;
 
@@ -414,17 +431,18 @@ struct rxe_dev {
 	struct rxe_pool		cq_pool;
 	struct rxe_pool		mr_pool;
 	struct rxe_pool		mw_pool;
+	struct rxe_pool		fmr_pool;
 	struct rxe_pool		mc_grp_pool;
 	struct rxe_pool		mc_elem_pool;
 
-	spinlock_t		pending_lock; /* guard pending_mmaps */
+	spinlock_t		pending_lock; /* pending lock */
 	struct list_head	pending_mmaps;
 
-	spinlock_t		mmap_offset_lock; /* guard mmap_offset */
+	spinlock_t		mmap_offset_lock; /* mmap offset lock */
 	int			mmap_offset;
 
-	struct rxe_port		port;
-	struct list_head	list;
+	u8			num_ports;
+	struct rxe_port		*port;
 };
 
 static inline struct rxe_dev *to_rdev(struct ib_device *dev)
@@ -467,9 +485,21 @@ static inline struct rxe_mem *to_rmr(struct ib_mr *mr)
 	return mr ? container_of(mr, struct rxe_mem, ibmr) : NULL;
 }
 
+static inline struct rxe_mem *to_rfmr(struct ib_fmr *fmr)
+{
+	return fmr ? container_of(fmr, struct rxe_mem, ibfmr) : NULL;
+}
+
 static inline struct rxe_mem *to_rmw(struct ib_mw *mw)
 {
 	return mw ? container_of(mw, struct rxe_mem, ibmw) : NULL;
+}
+
+static inline struct rxe_fast_reg_page_list *to_rfrpl(
+	struct ib_fast_reg_page_list *frpl)
+{
+	return frpl ? container_of(frpl,
+		struct rxe_fast_reg_page_list, ibfrpl) : NULL;
 }
 
 int rxe_register_device(struct rxe_dev *rxe);

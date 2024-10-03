@@ -12,8 +12,6 @@
 
 #include <drm/drmP.h>
 
-struct dw_hdmi;
-
 enum {
 	DW_HDMI_RES_8,
 	DW_HDMI_RES_10,
@@ -40,18 +38,17 @@ struct dw_hdmi_curr_ctrl {
 	u16 curr[DW_HDMI_RES_MAX];
 };
 
-struct dw_hdmi_phy_config {
+struct dw_hdmi_sym_term {
 	unsigned long mpixelclock;
 	u16 sym_ctr;    /*clock symbol and transmitter control*/
 	u16 term;       /*transmission termination value*/
-	u16 vlev_ctr;   /* voltage level control */
 };
 
 struct dw_hdmi_plat_data {
 	enum dw_hdmi_devtype dev_type;
 	const struct dw_hdmi_mpll_config *mpll_cfg;
 	const struct dw_hdmi_curr_ctrl *cur_ctr;
-	const struct dw_hdmi_phy_config *phy_config;
+	const struct dw_hdmi_sym_term *sym_term;
 	enum drm_mode_status (*mode_valid)(struct drm_connector *connector,
 					   struct drm_display_mode *mode);
 };
@@ -61,9 +58,4 @@ int dw_hdmi_bind(struct device *dev, struct device *master,
 		 void *data, struct drm_encoder *encoder,
 		 struct resource *iores, int irq,
 		 const struct dw_hdmi_plat_data *plat_data);
-
-void dw_hdmi_set_sample_rate(struct dw_hdmi *hdmi, unsigned int rate);
-void dw_hdmi_audio_enable(struct dw_hdmi *hdmi);
-void dw_hdmi_audio_disable(struct dw_hdmi *hdmi);
-
 #endif /* __IMX_HDMI_H__ */

@@ -39,10 +39,6 @@ static const struct mfd_cell tps65217s[] = {
 		.name = "tps65217-bl",
 		.of_compatible = "ti,tps65217-bl",
 	},
-	{
-		.name = "tps65217-charger",
-		.of_compatible = "ti,tps65217-charger",
-	},
 };
 
 /**
@@ -160,7 +156,6 @@ static const struct of_device_id tps65217_of_match[] = {
 	{ .compatible = "ti,tps65217", .data = (void *)TPS65217 },
 	{ /* sentinel */ },
 };
-MODULE_DEVICE_TABLE(of, tps65217_of_match);
 
 static int tps65217_probe(struct i2c_client *client,
 				const struct i2c_device_id *ids)
@@ -205,8 +200,8 @@ static int tps65217_probe(struct i2c_client *client,
 		return ret;
 	}
 
-	ret = devm_mfd_add_devices(tps->dev, -1, tps65217s,
-				   ARRAY_SIZE(tps65217s), NULL, 0, NULL);
+	ret = mfd_add_devices(tps->dev, -1, tps65217s,
+			      ARRAY_SIZE(tps65217s), NULL, 0, NULL);
 	if (ret < 0) {
 		dev_err(tps->dev, "mfd_add_devices failed: %d\n", ret);
 		return ret;
@@ -235,6 +230,15 @@ static int tps65217_probe(struct i2c_client *client,
 	return 0;
 }
 
+static int tps65217_remove(struct i2c_client *client)
+{
+	struct tps65217 *tps = i2c_get_clientdata(client);
+
+	mfd_remove_devices(tps->dev);
+
+	return 0;
+}
+
 static const struct i2c_device_id tps65217_id_table[] = {
 	{"tps65217", TPS65217},
 	{ /* sentinel */ }
@@ -244,10 +248,12 @@ MODULE_DEVICE_TABLE(i2c, tps65217_id_table);
 static struct i2c_driver tps65217_driver = {
 	.driver		= {
 		.name	= "tps65217",
+		.owner	= THIS_MODULE,
 		.of_match_table = tps65217_of_match,
 	},
 	.id_table	= tps65217_id_table,
 	.probe		= tps65217_probe,
+	.remove		= tps65217_remove,
 };
 
 static int __init tps65217_init(void)

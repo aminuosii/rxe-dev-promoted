@@ -24,6 +24,8 @@
 
 #include "clock.h"
 
+#define to_clk_divider(_hw) container_of(_hw, struct clk_divider, hw)
+
 #undef pr_fmt
 #define pr_fmt(fmt) "%s: " fmt, __func__
 
@@ -60,7 +62,7 @@ static const struct clk_ops omap_gate_clk_hsdiv_restore_ops = {
  * (Any other value different from the Read value) to the
  * corresponding CM_CLKSEL register will refresh the dividers.
  */
-static int omap36xx_gate_clk_enable_with_hsdiv_restore(struct clk_hw *hw)
+static int omap36xx_gate_clk_enable_with_hsdiv_restore(struct clk_hw *clk)
 {
 	struct clk_divider *parent;
 	struct clk_hw *parent_hw;
@@ -68,10 +70,10 @@ static int omap36xx_gate_clk_enable_with_hsdiv_restore(struct clk_hw *hw)
 	int ret;
 
 	/* Clear PWRDN bit of HSDIVIDER */
-	ret = omap2_dflt_clk_enable(hw);
+	ret = omap2_dflt_clk_enable(clk);
 
 	/* Parent is the x2 node, get parent of parent for the m2 div */
-	parent_hw = clk_hw_get_parent(clk_hw_get_parent(hw));
+	parent_hw = __clk_get_hw(__clk_get_parent(__clk_get_parent(clk->clk)));
 	parent = to_clk_divider(parent_hw);
 
 	/* Restore the dividers */
@@ -223,7 +225,7 @@ static void __init _of_ti_gate_clk_setup(struct device_node *node,
 
 	if (ops != &omap_gate_clkdm_clk_ops) {
 		reg = ti_clk_get_reg_addr(node, 0);
-		if (IS_ERR(reg))
+		if (!reg)
 			return;
 
 		if (!of_property_read_u32(node, "ti,bit-shift", &val))
@@ -262,7 +264,7 @@ _of_ti_composite_gate_clk_setup(struct device_node *node,
 		return;
 
 	gate->enable_reg = ti_clk_get_reg_addr(node, 0);
-	if (IS_ERR(gate->enable_reg))
+	if (!gate->enable_reg)
 		goto cleanup;
 
 	of_property_read_u32(node, "ti,bit-shift", &val);

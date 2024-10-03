@@ -861,7 +861,7 @@ rqbiocnt(struct request *r)
  * discussion.
  *
  * We cannot use get_page in the workaround, because it insists on a
- * positive page count as a precondition.  So we use _refcount directly.
+ * positive page count as a precondition.  So we use _count directly.
  */
 static void
 bio_pageinc(struct bio *bio)
@@ -875,7 +875,7 @@ bio_pageinc(struct bio *bio)
 		 * compound pages is no longer allowed by the kernel.
 		 */
 		page = compound_head(bv.bv_page);
-		page_ref_inc(page);
+		atomic_inc(&page->_count);
 	}
 }
 
@@ -888,7 +888,7 @@ bio_pagedec(struct bio *bio)
 
 	bio_for_each_segment(bv, bio, iter) {
 		page = compound_head(bv.bv_page);
-		page_ref_dec(page);
+		atomic_dec(&page->_count);
 	}
 }
 
@@ -964,9 +964,9 @@ aoecmd_sleepwork(struct work_struct *work)
 		ssize = get_capacity(d->gd);
 		bd = bdget_disk(d->gd, 0);
 		if (bd) {
-			inode_lock(bd->bd_inode);
+			mutex_lock(&bd->bd_inode->i_mutex);
 			i_size_write(bd->bd_inode, (loff_t)ssize<<9);
-			inode_unlock(bd->bd_inode);
+			mutex_unlock(&bd->bd_inode->i_mutex);
 			bdput(bd);
 		}
 		spin_lock_irq(&d->lock);
@@ -1110,7 +1110,7 @@ aoe_end_request(struct aoedev *d, struct request *rq, int fastfail)
 		d->ip.rq = NULL;
 	do {
 		bio = rq->bio;
-		bok = !fastfail && !bio->bi_error;
+		bok = !fastfail && test_bit(BIO_UPTODATE, &bio->bi_flags);
 	} while (__blk_end_request(rq, bok ? 0 : -EIO, bio->bi_iter.bi_size));
 
 	/* cf. http://lkml.org/lkml/2006/10/31/28 */
@@ -1172,7 +1172,7 @@ ktiocomplete(struct frame *f)
 			ahout->cmdstat, ahin->cmdstat,
 			d->aoemajor, d->aoeminor);
 noskb:		if (buf)
-			buf->bio->bi_error = -EIO;
+			clear_bit(BIO_UPTODATE, &buf->bio->bi_flags);
 		goto out;
 	}
 
@@ -1185,7 +1185,7 @@ noskb:		if (buf)
 				"aoe: runt data size in read from",
 				(long) d->aoemajor, d->aoeminor,
 			       skb->len, n);
-			buf->bio->bi_error = -EIO;
+			clear_bit(BIO_UPTODATE, &buf->bio->bi_flags);
 			break;
 		}
 		if (n > f->iter.bi_size) {
@@ -1193,7 +1193,7 @@ noskb:		if (buf)
 				"aoe: too-large data size in read from",
 				(long) d->aoemajor, d->aoeminor,
 				n, f->iter.bi_size);
-			buf->bio->bi_error = -EIO;
+			clear_bit(BIO_UPTODATE, &buf->bio->bi_flags);
 			break;
 		}
 		bvcpy(skb, f->buf->bio, f->iter, n);
@@ -1695,7 +1695,7 @@ aoe_failbuf(struct aoedev *d, struct buf *buf)
 	if (buf == NULL)
 		return;
 	buf->iter.bi_size = 0;
-	buf->bio->bi_error = -EIO;
+	clear_bit(BIO_UPTODATE, &buf->bio->bi_flags);
 	if (buf->nframesout == 0)
 		aoe_end_buf(d, buf);
 }

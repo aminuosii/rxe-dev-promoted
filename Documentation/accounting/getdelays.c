@@ -375,8 +375,7 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	nl_sd = create_nl_socket(NETLINK_GENERIC);
-	if (nl_sd < 0)
+	if ((nl_sd = create_nl_socket(NETLINK_GENERIC)) < 0)
 		err(1, "error creating Netlink socket\n");
 
 
@@ -505,8 +504,6 @@ int main(int argc, char *argv[])
 						if (!loop)
 							goto done;
 						break;
-					case TASKSTATS_TYPE_NULL:
-						break;
 					default:
 						fprintf(stderr, "Unknown nested"
 							" nla_type %d\n",
@@ -514,8 +511,7 @@ int main(int argc, char *argv[])
 						break;
 					}
 					len2 += NLA_ALIGN(na->nla_len);
-					na = (struct nlattr *)((char *)na +
-							       NLA_ALIGN(na->nla_len));
+					na = (struct nlattr *) ((char *) na + len2);
 				}
 				break;
 

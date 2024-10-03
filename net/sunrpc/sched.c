@@ -89,8 +89,8 @@ __rpc_add_timer(struct rpc_wait_queue *queue, struct rpc_task *task)
 	if (!task->tk_timeout)
 		return;
 
-	dprintk("RPC: %5u setting alarm for %u ms\n",
-		task->tk_pid, jiffies_to_msecs(task->tk_timeout));
+	dprintk("RPC: %5u setting alarm for %lu ms\n",
+			task->tk_pid, task->tk_timeout * 1000 / HZ);
 
 	task->u.tk_wait.expires = jiffies + task->tk_timeout;
 	if (list_empty(&queue->timer_list.list) || time_before(task->u.tk_wait.expires, queue->timer_list.expires))
@@ -250,11 +250,11 @@ void rpc_destroy_wait_queue(struct rpc_wait_queue *queue)
 }
 EXPORT_SYMBOL_GPL(rpc_destroy_wait_queue);
 
-static int rpc_wait_bit_killable(struct wait_bit_key *key, int mode)
+static int rpc_wait_bit_killable(struct wait_bit_key *key)
 {
-	freezable_schedule_unsafe();
-	if (signal_pending_state(mode, current))
+	if (fatal_signal_pending(current))
 		return -ERESTARTSYS;
+	freezable_schedule_unsafe();
 	return 0;
 }
 
@@ -909,8 +909,6 @@ static void rpc_init_task(struct rpc_task *task, const struct rpc_task_setup *ta
 	/* Initialize workqueue for async tasks */
 	task->tk_workqueue = task_setup_data->workqueue;
 
-	task->tk_xprt = xprt_get(task_setup_data->rpc_xprt);
-
 	if (task->tk_ops->rpc_call_prepare != NULL)
 		task->tk_action = rpc_prepare_task;
 
@@ -1094,10 +1092,14 @@ void
 rpc_destroy_mempool(void)
 {
 	rpciod_stop();
-	mempool_destroy(rpc_buffer_mempool);
-	mempool_destroy(rpc_task_mempool);
-	kmem_cache_destroy(rpc_task_slabp);
-	kmem_cache_destroy(rpc_buffer_slabp);
+	if (rpc_buffer_mempool)
+		mempool_destroy(rpc_buffer_mempool);
+	if (rpc_task_mempool)
+		mempool_destroy(rpc_task_mempool);
+	if (rpc_task_slabp)
+		kmem_cache_destroy(rpc_task_slabp);
+	if (rpc_buffer_slabp)
+		kmem_cache_destroy(rpc_buffer_slabp);
 	rpc_destroy_wait_queue(&delay_queue);
 }
 

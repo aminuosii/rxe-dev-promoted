@@ -79,7 +79,7 @@ NUM_BLKS    = %rdx
 c           = %rcx
 d           = %r8
 e           = %rdx
-y3          = %rsi
+y3          = %rdi
 
 TBL   = %rbp
 

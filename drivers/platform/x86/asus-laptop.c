@@ -54,7 +54,6 @@
 #include <linux/slab.h>
 #include <linux/dmi.h>
 #include <linux/acpi.h>
-#include <acpi/video.h>
 
 #define ASUS_LAPTOP_VERSION	"0.42"
 
@@ -332,7 +331,6 @@ static const struct key_entry asus_keymap[] = {
 	{KE_KEY, 0x65, { KEY_SWITCHVIDEOMODE } }, /* SDSP LCD + TV */
 	{KE_KEY, 0x66, { KEY_SWITCHVIDEOMODE } }, /* SDSP CRT + TV */
 	{KE_KEY, 0x67, { KEY_SWITCHVIDEOMODE } }, /* SDSP LCD + CRT + TV */
-	{KE_KEY, 0x6A, { KEY_TOUCHPAD_TOGGLE } }, /* Lock Touchpad Fn + F9 */
 	{KE_KEY, 0x6B, { KEY_TOUCHPAD_TOGGLE } }, /* Lock Touchpad */
 	{KE_KEY, 0x6C, { KEY_SLEEP } }, /* Suspend */
 	{KE_KEY, 0x6D, { KEY_SLEEP } }, /* Hibernate */
@@ -771,14 +769,12 @@ static int asus_read_brightness(struct backlight_device *bd)
 {
 	struct asus_laptop *asus = bl_get_data(bd);
 	unsigned long long value;
-	acpi_status rv;
+	acpi_status rv = AE_OK;
 
 	rv = acpi_evaluate_integer(asus->handle, METHOD_BRIGHTNESS_GET,
 				   NULL, &value);
-	if (ACPI_FAILURE(rv)) {
+	if (ACPI_FAILURE(rv))
 		pr_warn("Error reading brightness\n");
-		return 0;
-	}
 
 	return value;
 }
@@ -867,7 +863,7 @@ static ssize_t infos_show(struct device *dev, struct device_attribute *attr,
 	int len = 0;
 	unsigned long long temp;
 	char buf[16];		/* enough for all info */
-	acpi_status rv;
+	acpi_status rv = AE_OK;
 
 	/*
 	 * We use the easy way, we don't care of off and count,
@@ -948,10 +944,11 @@ static ssize_t sysfs_acpi_set(struct asus_laptop *asus,
 			      const char *method)
 {
 	int rv, value;
+	int out = 0;
 
 	rv = parse_arg(buf, count, &value);
-	if (rv <= 0)
-		return rv;
+	if (rv > 0)
+		out = value ? 1 : 0;
 
 	if (write_acpi_int(asus->handle, method, value))
 		return -ENODEV;
@@ -1266,7 +1263,7 @@ static DEVICE_ATTR_RO(ls_value);
 static int asus_gps_status(struct asus_laptop *asus)
 {
 	unsigned long long status;
-	acpi_status rv;
+	acpi_status rv = AE_OK;
 
 	rv = acpi_evaluate_integer(asus->handle, METHOD_GPS_STATUS,
 				   NULL, &status);
@@ -1887,11 +1884,12 @@ static int asus_acpi_add(struct acpi_device *device)
 	if (result)
 		goto fail_platform;
 
-	if (acpi_video_get_backlight_type() == acpi_backlight_vendor) {
+	if (!acpi_video_backlight_support()) {
 		result = asus_backlight_init(asus);
 		if (result)
 			goto fail_backlight;
-	}
+	} else
+		pr_info("Backlight controlled by ACPI video driver\n");
 
 	result = asus_input_init(asus);
 	if (result)

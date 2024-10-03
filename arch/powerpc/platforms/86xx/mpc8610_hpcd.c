@@ -24,7 +24,6 @@
 #include <linux/delay.h>
 #include <linux/seq_file.h>
 #include <linux/of.h>
-#include <linux/fsl/guts.h>
 
 #include <asm/time.h>
 #include <asm/machdep.h>
@@ -39,6 +38,7 @@
 #include <sysdev/fsl_pci.h>
 #include <sysdev/fsl_soc.h>
 #include <sysdev/simple_gpio.h>
+#include <asm/fsl_guts.h>
 
 #include "mpc86xx.h"
 
@@ -88,10 +88,12 @@ static inline void mpc8610_suspend_init(void) { }
 static const struct of_device_id mpc8610_ids[] __initconst = {
 	{ .compatible = "fsl,mpc8610-immr", },
 	{ .compatible = "fsl,mpc8610-guts", },
+	{ .compatible = "simple-bus", },
 	/* So that the DMA channel nodes can be probed individually: */
 	{ .compatible = "fsl,eloplus-dma", },
 	/* PCI controllers */
 	{ .compatible = "fsl,mpc8610-pci", },
+	{ .compatible = "fsl,mpc8641-pcie", },
 	{}
 };
 
@@ -102,8 +104,6 @@ static int __init mpc8610_declare_of_platform_devices(void)
 
 	/* Enable wakeup on PIXIS' event IRQ. */
 	mpc8610_suspend_init();
-
-	mpc86xx_common_publish_devices();
 
 	/* Without this call, the SSI device driver won't get probed. */
 	of_platform_bus_probe(NULL, mpc8610_ids, NULL);
@@ -323,6 +323,22 @@ static int __init mpc86xx_hpcd_probe(void)
 
 	if (of_flat_dt_is_compatible(root, "fsl,MPC8610HPCD"))
 		return 1;	/* Looks good */
+
+	return 0;
+}
+
+static long __init mpc86xx_time_init(void)
+{
+	unsigned int temp;
+
+	/* Set the time base to zero */
+	mtspr(SPRN_TBWL, 0);
+	mtspr(SPRN_TBWU, 0);
+
+	temp = mfspr(SPRN_HID0);
+	temp |= HID0_TBEN;
+	mtspr(SPRN_HID0, temp);
+	asm volatile("isync");
 
 	return 0;
 }

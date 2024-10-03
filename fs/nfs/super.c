@@ -43,6 +43,7 @@
 #include <linux/seq_file.h>
 #include <linux/mount.h>
 #include <linux/namei.h>
+#include <linux/nfs_idmap.h>
 #include <linux/vfs.h>
 #include <linux/inet.h>
 #include <linux/in6.h>
@@ -191,7 +192,6 @@ static const match_table_t nfs_mount_option_tokens = {
 
 enum {
 	Opt_xprt_udp, Opt_xprt_udp6, Opt_xprt_tcp, Opt_xprt_tcp6, Opt_xprt_rdma,
-	Opt_xprt_rdma6,
 
 	Opt_xprt_err
 };
@@ -202,7 +202,6 @@ static const match_table_t nfs_xprt_protocol_tokens = {
 	{ Opt_xprt_tcp, "tcp" },
 	{ Opt_xprt_tcp6, "tcp6" },
 	{ Opt_xprt_rdma, "rdma" },
-	{ Opt_xprt_rdma6, "rdma6" },
 
 	{ Opt_xprt_err, NULL }
 };
@@ -383,12 +382,9 @@ int __init register_nfs_fs(void)
 	ret = nfs_register_sysctl();
 	if (ret < 0)
 		goto error_2;
-	ret = register_shrinker(&acl_shrinker);
-	if (ret < 0)
-		goto error_3;
+	register_shrinker(&acl_shrinker);
 	return 0;
-error_3:
-	nfs_unregister_sysctl();
+
 error_2:
 	unregister_nfs4_fs();
 error_1:
@@ -437,7 +433,7 @@ int nfs_statfs(struct dentry *dentry, struct kstatfs *buf)
 	struct nfs_server *server = NFS_SB(dentry->d_sb);
 	unsigned char blockbits;
 	unsigned long blockres;
-	struct nfs_fh *fh = NFS_FH(d_inode(dentry));
+	struct nfs_fh *fh = NFS_FH(dentry->d_inode);
 	struct nfs_fsstat res;
 	int error = -ENOMEM;
 
@@ -451,7 +447,7 @@ int nfs_statfs(struct dentry *dentry, struct kstatfs *buf)
 
 		pd_dentry = dget_parent(dentry);
 		if (pd_dentry != NULL) {
-			nfs_zap_caches(d_inode(pd_dentry));
+			nfs_zap_caches(pd_dentry->d_inode);
 			dput(pd_dentry);
 		}
 	}
@@ -1458,8 +1454,6 @@ static int nfs_parse_mount_options(char *raw,
 				mnt->flags |= NFS_MOUNT_TCP;
 				mnt->nfs_server.protocol = XPRT_TRANSPORT_TCP;
 				break;
-			case Opt_xprt_rdma6:
-				protofamily = AF_INET6;
 			case Opt_xprt_rdma:
 				/* vector side protocols to TCP */
 				mnt->flags |= NFS_MOUNT_TCP;
@@ -2199,7 +2193,7 @@ nfs_compare_remount_data(struct nfs_server *nfss,
 	    data->version != nfss->nfs_client->rpc_ops->version ||
 	    data->minorversion != nfss->nfs_client->cl_minorversion ||
 	    data->retrans != nfss->client->cl_timeout->to_retries ||
-	    !nfs_auth_info_match(&data->auth_info, nfss->client->cl_auth->au_flavor) ||
+	    data->selected_flavor != nfss->client->cl_auth->au_flavor ||
 	    data->acregmin != nfss->acregmin / HZ ||
 	    data->acregmax != nfss->acregmax / HZ ||
 	    data->acdirmin != nfss->acdirmin / HZ ||
@@ -2247,6 +2241,7 @@ nfs_remount(struct super_block *sb, int *flags, char *raw_data)
 	data->wsize = nfss->wsize;
 	data->retrans = nfss->client->cl_timeout->to_retries;
 	data->selected_flavor = nfss->client->cl_auth->au_flavor;
+	data->auth_info = nfss->auth_info;
 	data->acregmin = nfss->acregmin / HZ;
 	data->acregmax = nfss->acregmax / HZ;
 	data->acdirmin = nfss->acdirmin / HZ;
@@ -2412,11 +2407,6 @@ static int nfs_compare_super_address(struct nfs_server *server1,
 				     struct nfs_server *server2)
 {
 	struct sockaddr *sap1, *sap2;
-	struct rpc_xprt *xprt1 = server1->client->cl_xprt;
-	struct rpc_xprt *xprt2 = server2->client->cl_xprt;
-
-	if (!net_eq(xprt1->xprt_net, xprt2->xprt_net))
-		return 0;
 
 	sap1 = (struct sockaddr *)&server1->nfs_client->cl_addr;
 	sap2 = (struct sockaddr *)&server2->nfs_client->cl_addr;
@@ -2536,7 +2526,7 @@ int nfs_clone_sb_security(struct super_block *s, struct dentry *mntroot,
 			  struct nfs_mount_info *mount_info)
 {
 	/* clone any lsm security options from the parent to the new sb */
-	if (d_inode(mntroot)->i_op != NFS_SB(s)->nfs_client->rpc_ops->dir_inode_ops)
+	if (mntroot->d_inode->i_op != NFS_SB(s)->nfs_client->rpc_ops->dir_inode_ops)
 		return -ESTALE;
 	return security_sb_clone_mnt_opts(mount_info->cloned->sb, s);
 }
@@ -2825,6 +2815,7 @@ out_invalid_transport_udp:
  * NFS client for backwards compatibility
  */
 unsigned int nfs_callback_set_tcpport;
+unsigned short nfs_callback_tcpport;
 /* Default cache timeout is 10 minutes */
 unsigned int nfs_idmap_cache_timeout = 600;
 /* Turn off NFSv4 uid/gid mapping when using AUTH_SYS */
@@ -2835,6 +2826,7 @@ char nfs4_client_id_uniquifier[NFS4_CLIENT_ID_UNIQ_LEN] = "";
 bool recover_lost_locks = false;
 
 EXPORT_SYMBOL_GPL(nfs_callback_set_tcpport);
+EXPORT_SYMBOL_GPL(nfs_callback_tcpport);
 EXPORT_SYMBOL_GPL(nfs_idmap_cache_timeout);
 EXPORT_SYMBOL_GPL(nfs4_disable_idmapping);
 EXPORT_SYMBOL_GPL(max_session_slots);
@@ -2857,7 +2849,7 @@ static int param_set_portnr(const char *val, const struct kernel_param *kp)
 	*((unsigned int *)kp->arg) = num;
 	return 0;
 }
-static const struct kernel_param_ops param_ops_portnr = {
+static struct kernel_param_ops param_ops_portnr = {
 	.set = param_set_portnr,
 	.get = param_get_uint,
 };

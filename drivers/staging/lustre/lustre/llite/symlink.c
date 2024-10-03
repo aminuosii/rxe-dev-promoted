@@ -59,8 +59,7 @@ static int ll_readlink_internal(struct inode *inode,
 		*symname = lli->lli_symlink_name;
 		/* If the total CDEBUG() size is larger than a page, it
 		 * will print a warning to the console, avoid this by
-		 * printing just the last part of the symlink.
-		 */
+		 * printing just the last part of the symlink. */
 		CDEBUG(D_INODE, "using cached symlink %s%.*s, len = %d\n",
 		       print_limit < symlen ? "..." : "", print_limit,
 		       (*symname) + symlen - print_limit, symlen);
@@ -77,13 +76,12 @@ static int ll_readlink_internal(struct inode *inode,
 	ll_finish_md_op_data(op_data);
 	if (rc) {
 		if (rc != -ENOENT)
-			CERROR("%s: inode "DFID": rc = %d\n",
-			       ll_get_fsname(inode->i_sb, NULL, 0),
-			       PFID(ll_inode2fid(inode)), rc);
+			CERROR("inode %lu: rc = %d\n", inode->i_ino, rc);
 		goto failed;
 	}
 
 	body = req_capsule_server_get(&(*request)->rq_pill, &RMF_MDT_BODY);
+	LASSERT(body != NULL);
 	if ((body->valid & OBD_MD_LINKNAME) == 0) {
 		CERROR("OBD_MD_LINKNAME not set on reply\n");
 		rc = -EPROTO;
@@ -92,16 +90,14 @@ static int ll_readlink_internal(struct inode *inode,
 
 	LASSERT(symlen != 0);
 	if (body->eadatasize != symlen) {
-		CERROR("%s: inode "DFID": symlink length %d not expected %d\n",
-		       ll_get_fsname(inode->i_sb, NULL, 0),
-		       PFID(ll_inode2fid(inode)), body->eadatasize - 1,
-		       symlen - 1);
+		CERROR("inode %lu: symlink length %d not expected %d\n",
+			inode->i_ino, body->eadatasize - 1, symlen - 1);
 		rc = -EPROTO;
 		goto failed;
 	}
 
 	*symname = req_capsule_server_get(&(*request)->rq_pill, &RMF_MDT_MD);
-	if (!*symname ||
+	if (*symname == NULL ||
 	    strnlen(*symname, symlen) != symlen - 1) {
 		/* not full/NULL terminated */
 		CERROR("inode %lu: symlink not NULL terminated string of length %d\n",
@@ -122,41 +118,49 @@ failed:
 	return rc;
 }
 
-static void ll_put_link(void *p)
+static void *ll_follow_link(struct dentry *dentry, struct nameidata *nd)
 {
-	ptlrpc_req_finished(p);
-}
-
-static const char *ll_get_link(struct dentry *dentry,
-			       struct inode *inode,
-			       struct delayed_call *done)
-{
+	struct inode *inode = dentry->d_inode;
 	struct ptlrpc_request *request = NULL;
 	int rc;
 	char *symname = NULL;
-	if (!dentry)
-		return ERR_PTR(-ECHILD);
 
 	CDEBUG(D_VFSTRACE, "VFS Op\n");
-	ll_inode_size_lock(inode);
-	rc = ll_readlink_internal(inode, &request, &symname);
-	ll_inode_size_unlock(inode);
+	/* Limit the recursive symlink depth to 5 instead of default
+	 * 8 links when kernel has 4k stack to prevent stack overflow.
+	 * For 8k stacks we need to limit it to 7 for local servers. */
+	if (THREAD_SIZE < 8192 && current->link_count >= 6) {
+		rc = -ELOOP;
+	} else if (THREAD_SIZE == 8192 && current->link_count >= 8) {
+		rc = -ELOOP;
+	} else {
+		ll_inode_size_lock(inode);
+		rc = ll_readlink_internal(inode, &request, &symname);
+		ll_inode_size_unlock(inode);
+	}
 	if (rc) {
 		ptlrpc_req_finished(request);
-		return ERR_PTR(rc);
+		request = NULL;
+		symname = ERR_PTR(rc);
 	}
 
+	nd_set_link(nd, symname);
 	/* symname may contain a pointer to the request message buffer,
-	 * we delay request releasing then.
+	 * we delay request releasing until ll_put_link then.
 	 */
-	set_delayed_call(done, ll_put_link, request);
-	return symname;
+	return request;
 }
 
-const struct inode_operations ll_fast_symlink_inode_operations = {
+static void ll_put_link(struct dentry *dentry, struct nameidata *nd, void *cookie)
+{
+	ptlrpc_req_finished(cookie);
+}
+
+struct inode_operations ll_fast_symlink_inode_operations = {
 	.readlink	= generic_readlink,
 	.setattr	= ll_setattr,
-	.get_link	= ll_get_link,
+	.follow_link	= ll_follow_link,
+	.put_link	= ll_put_link,
 	.getattr	= ll_getattr,
 	.permission	= ll_inode_permission,
 	.setxattr	= ll_setxattr,

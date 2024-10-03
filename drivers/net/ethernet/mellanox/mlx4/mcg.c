@@ -39,6 +39,8 @@
 
 #include "mlx4.h"
 
+static const u8 zero_gid[16];	/* automatically initialized to 0 */
+
 int mlx4_get_mgm_entry_size(struct mlx4_dev *dev)
 {
 	return 1 << dev->oper_log_mgm_entry_size;
@@ -750,10 +752,8 @@ static const u8 __promisc_mode[] = {
 	[MLX4_FS_REGULAR]   = 0x0,
 	[MLX4_FS_ALL_DEFAULT] = 0x1,
 	[MLX4_FS_MC_DEFAULT] = 0x3,
-	[MLX4_FS_MIRROR_RX_PORT] = 0x4,
-	[MLX4_FS_MIRROR_SX_PORT] = 0x5,
-	[MLX4_FS_UC_SNIFFER] = 0x6,
-	[MLX4_FS_MC_SNIFFER] = 0x7,
+	[MLX4_FS_UC_SNIFFER] = 0x4,
+	[MLX4_FS_MC_SNIFFER] = 0x5,
 };
 
 int mlx4_map_sw_to_hw_steering_mode(struct mlx4_dev *dev,
@@ -858,7 +858,9 @@ static int parse_trans_rule(struct mlx4_dev *dev, struct mlx4_spec_list *spec,
 		break;
 
 	case MLX4_NET_TRANS_RULE_ID_IB:
-		rule_hw->ib.l3_qpn = spec->ib.l3_qpn;
+		rule_hw->ib.l3_qpn = spec->ib.l3_qpn |
+			(spec->ib.roce_type == MLX4_FLOW_SPEC_IB_ROCE_TYPE_IPV4 ?
+			 0x80 : 0);
 		rule_hw->ib.qpn_mask = spec->ib.qpn_msk;
 		memcpy(&rule_hw->ib.dst_gid, &spec->ib.dst_gid, 16);
 		memcpy(&rule_hw->ib.dst_gid_msk, &spec->ib.dst_gid_msk, 16);
@@ -1102,7 +1104,7 @@ int mlx4_qp_attach_common(struct mlx4_dev *dev, struct mlx4_qp *qp, u8 gid[16],
 	struct mlx4_cmd_mailbox *mailbox;
 	struct mlx4_mgm *mgm;
 	u32 members_count;
-	int index = -1, prev;
+	int index, prev;
 	int link = 0;
 	int i;
 	int err;
@@ -1181,14 +1183,13 @@ int mlx4_qp_attach_common(struct mlx4_dev *dev, struct mlx4_qp *qp, u8 gid[16],
 		goto out;
 
 out:
-	if (prot == MLX4_PROT_ETH && index != -1) {
+	if (prot == MLX4_PROT_ETH) {
 		/* manage the steering entry for promisc mode */
 		if (new_entry)
-			err = new_steering_entry(dev, port, steer,
-						 index, qp->qpn);
+			new_steering_entry(dev, port, steer, index, qp->qpn);
 		else
-			err = existing_steering_entry(dev, port, steer,
-						      index, qp->qpn);
+			existing_steering_entry(dev, port, steer,
+						index, qp->qpn);
 	}
 	if (err && link && index != -1) {
 		if (index < dev->caps.num_mgms)
@@ -1384,10 +1385,18 @@ int mlx4_trans_to_dmfs_attach(struct mlx4_dev *dev, struct mlx4_qp *qp,
 			memcpy(spec.eth.dst_mac_msk, &mac_mask, ETH_ALEN);
 			break;
 
+		case MLX4_PROT_IB_IPV4:
+			spec.id = MLX4_NET_TRANS_RULE_ID_IB;
+			memcpy(spec.ib.dst_gid + 12, gid + 12, 4);
+			memset(spec.ib.dst_gid_msk + 12, 0xff, 4);
+			spec.ib.roce_type = MLX4_FLOW_SPEC_IB_ROCE_TYPE_IPV4;
+
+			break;
 		case MLX4_PROT_IB_IPV6:
 			spec.id = MLX4_NET_TRANS_RULE_ID_IB;
 			memcpy(spec.ib.dst_gid, gid, 16);
-			memset(&spec.ib.dst_gid_msk, 0xff, 16);
+			memset(spec.ib.dst_gid_msk, 0xff, 16);
+			spec.ib.roce_type = MLX4_FLOW_SPEC_IB_ROCE_TYPE_IPV6;
 			break;
 		default:
 			return -EINVAL;

@@ -24,7 +24,6 @@
 #include <linux/usb.h>
 
 #include <media/v4l2-device.h>
-#include <media/videobuf2-v4l2.h>
 #include <media/videobuf2-vmalloc.h>
 
 /* Hardware. */
@@ -62,7 +61,7 @@ struct usbtv_norm_params {
 
 /* A single videobuf2 frame buffer. */
 struct usbtv_buf {
-	struct vb2_v4l2_buffer vb;
+	struct vb2_buffer vb;
 	struct list_head list;
 };
 
@@ -95,7 +94,6 @@ struct usbtv {
 	int width, height;
 	int n_chunks;
 	int iso_size;
-	int last_odd;
 	unsigned int sequence;
 	struct urb *isoc_urbs[USBTV_ISOC_TRANSFERS];
 

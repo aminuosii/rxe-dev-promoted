@@ -148,11 +148,7 @@ static void cache_shared_cpu_map_remove(unsigned int cpu)
 
 			if (sibling == cpu) /* skip itself */
 				continue;
-
 			sib_cpu_ci = get_cpu_cacheinfo(sibling);
-			if (!sib_cpu_ci->info_list)
-				continue;
-
 			sib_leaf = sib_cpu_ci->info_list + index;
 			cpumask_clear_cpu(cpu, &sib_leaf->shared_cpu_map);
 			cpumask_clear_cpu(sibling, &this_leaf->shared_cpu_map);
@@ -163,9 +159,6 @@ static void cache_shared_cpu_map_remove(unsigned int cpu)
 
 static void free_cache_attributes(unsigned int cpu)
 {
-	if (!per_cpu_cacheinfo(cpu))
-		return;
-
 	cache_shared_cpu_map_remove(cpu);
 
 	kfree(per_cpu_cacheinfo(cpu));
@@ -186,7 +179,7 @@ static int detect_cache_attributes(unsigned int cpu)
 {
 	int ret;
 
-	if (init_cache_level(cpu) || !cache_leaves(cpu))
+	if (init_cache_level(cpu))
 		return -ENOENT;
 
 	per_cpu_cacheinfo(cpu) = kcalloc(cache_leaves(cpu),
@@ -198,12 +191,12 @@ static int detect_cache_attributes(unsigned int cpu)
 	if (ret)
 		goto free_ci;
 	/*
-	 * For systems using DT for cache hierarchy, of_node and shared_cpu_map
+	 * For systems using DT for cache hierarcy, of_node and shared_cpu_map
 	 * will be set up here only if they are not populated already
 	 */
 	ret = cache_shared_cpu_map_setup(cpu);
 	if (ret) {
-		pr_warn("Unable to detect cache hierarchy from DT for CPU %d\n",
+		pr_warn("Unable to detect cache hierarcy from DT for CPU %d\n",
 			cpu);
 		goto free_ci;
 	}
@@ -521,7 +514,8 @@ static int cacheinfo_cpu_callback(struct notifier_block *nfb,
 		break;
 	case CPU_DEAD:
 		cache_remove_dev(cpu);
-		free_cache_attributes(cpu);
+		if (per_cpu_cacheinfo(cpu))
+			free_cache_attributes(cpu);
 		break;
 	}
 	return notifier_from_errno(rc);

@@ -237,27 +237,12 @@ static void dump_common_audit_data(struct audit_buffer *ab,
 
 		audit_log_d_path(ab, " path=", &a->u.path);
 
-		inode = d_backing_inode(a->u.path.dentry);
+		inode = a->u.path.dentry->d_inode;
 		if (inode) {
 			audit_log_format(ab, " dev=");
 			audit_log_untrustedstring(ab, inode->i_sb->s_id);
 			audit_log_format(ab, " ino=%lu", inode->i_ino);
 		}
-		break;
-	}
-	case LSM_AUDIT_DATA_IOCTL_OP: {
-		struct inode *inode;
-
-		audit_log_d_path(ab, " path=", &a->u.op->path);
-
-		inode = a->u.op->path.dentry->d_inode;
-		if (inode) {
-			audit_log_format(ab, " dev=");
-			audit_log_untrustedstring(ab, inode->i_sb->s_id);
-			audit_log_format(ab, " ino=%lu", inode->i_ino);
-		}
-
-		audit_log_format(ab, " ioctlcmd=%hx", a->u.op->cmd);
 		break;
 	}
 	case LSM_AUDIT_DATA_DENTRY: {
@@ -266,7 +251,7 @@ static void dump_common_audit_data(struct audit_buffer *ab,
 		audit_log_format(ab, " name=");
 		audit_log_untrustedstring(ab, a->u.dentry->d_name.name);
 
-		inode = d_backing_inode(a->u.dentry);
+		inode = a->u.dentry->d_inode;
 		if (inode) {
 			audit_log_format(ab, " dev=");
 			audit_log_untrustedstring(ab, inode->i_sb->s_id);
@@ -297,7 +282,7 @@ static void dump_common_audit_data(struct audit_buffer *ab,
 			pid_t pid = task_pid_nr(tsk);
 			if (pid) {
 				char comm[sizeof(tsk->comm)];
-				audit_log_format(ab, " opid=%d ocomm=", pid);
+				audit_log_format(ab, " pid=%d comm=", pid);
 				audit_log_untrustedstring(ab,
 				    memcpy(comm, tsk->comm, sizeof(comm)));
 			}

@@ -13,7 +13,11 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  *
- * Written by Koji Sato.
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ *
+ * Written by Koji Sato <koji@osrg.net>.
  */
 
 #include <linux/types.h>
@@ -151,6 +155,7 @@ void nilfs_dat_commit_start(struct inode *dat, struct nilfs_palloc_req *req,
 int nilfs_dat_prepare_end(struct inode *dat, struct nilfs_palloc_req *req)
 {
 	struct nilfs_dat_entry *entry;
+	__u64 start;
 	sector_t blocknr;
 	void *kaddr;
 	int ret;
@@ -164,6 +169,7 @@ int nilfs_dat_prepare_end(struct inode *dat, struct nilfs_palloc_req *req)
 	kaddr = kmap_atomic(req->pr_entry_bh->b_page);
 	entry = nilfs_palloc_block_get_entry(dat, req->pr_entry_nr,
 					     req->pr_entry_bh, kaddr);
+	start = le64_to_cpu(entry->de_start);
 	blocknr = le64_to_cpu(entry->de_blocknr);
 	kunmap_atomic(kaddr);
 
@@ -424,7 +430,7 @@ int nilfs_dat_translate(struct inode *dat, __u64 vblocknr, sector_t *blocknrp)
 	return ret;
 }
 
-ssize_t nilfs_dat_get_vinfo(struct inode *dat, void *buf, unsigned int visz,
+ssize_t nilfs_dat_get_vinfo(struct inode *dat, void *buf, unsigned visz,
 			    size_t nvi)
 {
 	struct buffer_head *entry_bh;

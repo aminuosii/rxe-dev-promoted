@@ -159,7 +159,7 @@ static int tlb_initialize(struct bonding *bond)
 
 	new_hashtbl = kzalloc(size, GFP_KERNEL);
 	if (!new_hashtbl)
-		return -ENOMEM;
+		return -1;
 
 	spin_lock_bh(&bond->mode_lock);
 

@@ -278,8 +278,7 @@ static int prism2_fwapply(const struct ihex_binrec *rfptr,
 	/* Build the PDA we're going to use. */
 	if (read_cardpda(&pda, wlandev)) {
 		netdev_err(wlandev->netdev, "load_cardpda failed, exiting.\n");
-		result = 1;
-		goto out;
+		return 1;
 	}
 
 	/* read the card's PRI-SUP */
@@ -316,58 +315,51 @@ static int prism2_fwapply(const struct ihex_binrec *rfptr,
 	if (result) {
 		netdev_err(wlandev->netdev,
 			   "Failed to read the data exiting.\n");
-		goto out;
+		return 1;
 	}
 
 	result = validate_identity();
+
 	if (result) {
 		netdev_err(wlandev->netdev, "Incompatible firmware image.\n");
-		goto out;
+		return 1;
 	}
 
 	if (startaddr == 0x00000000) {
 		netdev_err(wlandev->netdev,
 			   "Can't RAM download a Flash image!\n");
-		result = 1;
-		goto out;
+		return 1;
 	}
 
 	/* Make the image chunks */
 	result = mkimage(fchunk, &nfchunks);
-	if (result) {
-		netdev_err(wlandev->netdev, "Failed to make image chunk.\n");
-		goto free_chunks;
-	}
 
 	/* Do any plugging */
 	result = plugimage(fchunk, nfchunks, s3plug, ns3plug, &pda);
 	if (result) {
 		netdev_err(wlandev->netdev, "Failed to plug data.\n");
-		goto free_chunks;
+		return 1;
 	}
 
 	/* Insert any CRCs */
-	result = crcimage(fchunk, nfchunks, s3crc, ns3crc);
-	if (result) {
+	if (crcimage(fchunk, nfchunks, s3crc, ns3crc)) {
 		netdev_err(wlandev->netdev, "Failed to insert all CRCs\n");
-		goto free_chunks;
+		return 1;
 	}
 
 	/* Write the image */
 	result = writeimage(wlandev, fchunk, nfchunks);
 	if (result) {
 		netdev_err(wlandev->netdev, "Failed to ramwrite image data.\n");
-		goto free_chunks;
+		return 1;
 	}
 
-	netdev_info(wlandev->netdev, "prism2_usb: firmware loading finished.\n");
-
-free_chunks:
 	/* clear any allocated memory */
 	free_chunks(fchunk, &nfchunks);
 	free_srecs();
 
-out:
+	netdev_info(wlandev->netdev, "prism2_usb: firmware loading finished.\n");
+
 	return result;
 }
 
@@ -546,7 +538,7 @@ static int mkimage(struct imgchunk *clist, unsigned int *ccnt)
 	/* Allocate buffer space for chunks */
 	for (i = 0; i < *ccnt; i++) {
 		clist[i].data = kzalloc(clist[i].len, GFP_KERNEL);
-		if (!clist[i].data) {
+		if (clist[i].data == NULL) {
 			pr_err("failed to allocate image space, exitting.\n");
 			return 1;
 		}
@@ -592,12 +584,13 @@ static int mkimage(struct imgchunk *clist, unsigned int *ccnt)
 ----------------------------------------------------------------*/
 static int mkpdrlist(struct pda *pda)
 {
+	int result = 0;
 	u16 *pda16 = (u16 *) pda->buf;
 	int curroff;		/* in 'words' */
 
 	pda->nrec = 0;
 	curroff = 0;
-	while (curroff < (HFA384x_PDA_LEN_MAX / 2 - 1) &&
+	while (curroff < (HFA384x_PDA_LEN_MAX / 2) &&
 	       le16_to_cpu(pda16[curroff + 1]) != HFA384x_PDR_END_OF_PDA) {
 		pda->rec[pda->nrec] = (hfa384x_pdrec_t *) &(pda16[curroff]);
 
@@ -633,14 +626,16 @@ static int mkpdrlist(struct pda *pda)
 		curroff += le16_to_cpu(pda16[curroff]) + 1;
 
 	}
-	if (curroff >= (HFA384x_PDA_LEN_MAX / 2 - 1)) {
+	if (curroff >= (HFA384x_PDA_LEN_MAX / 2)) {
 		pr_err("no end record found or invalid lengths in PDR data, exiting. %x %d\n",
 		       curroff, pda->nrec);
 		return 1;
 	}
-	pda->rec[pda->nrec] = (hfa384x_pdrec_t *) &(pda16[curroff]);
-	(pda->nrec)++;
-	return 0;
+	if (le16_to_cpu(pda16[curroff + 1]) == HFA384x_PDR_END_OF_PDA) {
+		pda->rec[pda->nrec] = (hfa384x_pdrec_t *) &(pda16[curroff]);
+		(pda->nrec)++;
+	}
+	return result;
 }
 
 /*----------------------------------------------------------------
@@ -713,10 +708,7 @@ static int plugimage(struct imgchunk *fchunk, unsigned int nfchunks,
 			continue;
 		}
 
-		/*
-		 * Validate plug address against
-		 * chunk data and identify chunk
-		 */
+		/* Validate plug address against chunk data and identify chunk */
 		for (c = 0; c < nfchunks; c++) {
 			cstart = fchunk[c].addr;
 			cend = fchunk[c].addr + fchunk[c].len;
@@ -931,8 +923,7 @@ static int read_fwfile(const struct ihex_binrec *record)
 				      rcnt,
 				      s3info[ns3info].len,
 				      s3info[ns3info].type);
-			if (((s3info[ns3info].len - 1) * sizeof(u16)) >
-			   sizeof(s3info[ns3info].info)) {
+			if (((s3info[ns3info].len - 1) * sizeof(u16)) > sizeof(s3info[ns3info].info)) {
 				pr_err("S3 inforec length too long - aborting\n");
 				return 1;
 			}

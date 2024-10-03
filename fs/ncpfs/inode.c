@@ -82,7 +82,7 @@ static int init_inodecache(void)
 	ncp_inode_cachep = kmem_cache_create("ncp_inode_cache",
 					     sizeof(struct ncp_inode_info),
 					     0, (SLAB_RECLAIM_ACCOUNT|
-						SLAB_MEM_SPREAD|SLAB_ACCOUNT),
+						SLAB_MEM_SPREAD),
 					     init_once);
 	if (ncp_inode_cachep == NULL)
 		return -ENOMEM;
@@ -244,7 +244,8 @@ static void ncp_set_attr(struct inode *inode, struct ncp_entry_info *nwinfo)
 #if defined(CONFIG_NCPFS_EXTRAS) || defined(CONFIG_NCPFS_NFS_NS)
 static const struct inode_operations ncp_symlink_inode_operations = {
 	.readlink	= generic_readlink,
-	.get_link	= page_get_link,
+	.follow_link	= page_follow_link_light,
+	.put_link	= page_put_link,
 	.setattr	= ncp_notify_change,
 };
 #endif
@@ -282,7 +283,6 @@ ncp_iget(struct super_block *sb, struct ncp_entry_info *info)
 #if defined(CONFIG_NCPFS_EXTRAS) || defined(CONFIG_NCPFS_NFS_NS)
 		} else if (S_ISLNK(inode->i_mode)) {
 			inode->i_op = &ncp_symlink_inode_operations;
-			inode_nohighmem(inode);
 			inode->i_data.a_ops = &ncp_symlink_aops;
 #endif
 		} else {
@@ -812,7 +812,7 @@ static int ncp_statfs(struct dentry *dentry, struct kstatfs *buf)
 	if (!d) {
 		goto dflt;
 	}
-	i = d_inode(d);
+	i = d->d_inode;
 	if (!i) {
 		goto dflt;
 	}
@@ -865,7 +865,7 @@ dflt:;
 
 int ncp_notify_change(struct dentry *dentry, struct iattr *attr)
 {
-	struct inode *inode = d_inode(dentry);
+	struct inode *inode = dentry->d_inode;
 	int result = 0;
 	__le32 info_mask;
 	struct nw_modify_dos_info info;
@@ -878,7 +878,7 @@ int ncp_notify_change(struct dentry *dentry, struct iattr *attr)
 		goto out;
 
 	result = -EPERM;
-	if (IS_DEADDIR(d_inode(dentry)))
+	if (IS_DEADDIR(dentry->d_inode))
 		goto out;
 
 	/* ageing the dentry to force validation */

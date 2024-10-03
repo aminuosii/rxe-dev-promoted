@@ -855,20 +855,13 @@ int aac_do_ioctl(struct aac_dev * dev, int cmd, void __user *arg)
 {
 	int status;
 
-	mutex_lock(&dev->ioctl_mutex);
-
-	if (dev->adapter_shutdown) {
-		status = -EACCES;
-		goto cleanup;
-	}
-
 	/*
 	 *	HBA gets first crack
 	 */
 
 	status = aac_dev_ioctl(dev, cmd, arg);
 	if (status != -ENOTTY)
-		goto cleanup;
+		return status;
 
 	switch (cmd) {
 	case FSACTL_MINIPORT_REV_CHECK:
@@ -897,10 +890,6 @@ int aac_do_ioctl(struct aac_dev * dev, int cmd, void __user *arg)
 		status = -ENOTTY;
 		break;
 	}
-
-cleanup:
-	mutex_unlock(&dev->ioctl_mutex);
-
 	return status;
 }
 

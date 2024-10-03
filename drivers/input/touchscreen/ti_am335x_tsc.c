@@ -273,6 +273,8 @@ static irqreturn_t titsc_irq(int irq, void *dev)
 	status = titsc_readl(ts_dev, REG_RAWIRQSTATUS);
 	if (status & IRQENB_HW_PEN) {
 		ts_dev->pen_down = true;
+		titsc_writel(ts_dev, REG_IRQWAKEUP, 0x00);
+		titsc_writel(ts_dev, REG_IRQCLR, IRQENB_HW_PEN);
 		irqclr |= IRQENB_HW_PEN;
 	}
 
@@ -487,7 +489,8 @@ static int titsc_remove(struct platform_device *pdev)
 	return 0;
 }
 
-static int __maybe_unused titsc_suspend(struct device *dev)
+#ifdef CONFIG_PM
+static int titsc_suspend(struct device *dev)
 {
 	struct titsc *ts_dev = dev_get_drvdata(dev);
 	struct ti_tscadc_dev *tscadc_dev;
@@ -503,7 +506,7 @@ static int __maybe_unused titsc_suspend(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused titsc_resume(struct device *dev)
+static int titsc_resume(struct device *dev)
 {
 	struct titsc *ts_dev = dev_get_drvdata(dev);
 	struct ti_tscadc_dev *tscadc_dev;
@@ -520,7 +523,14 @@ static int __maybe_unused titsc_resume(struct device *dev)
 	return 0;
 }
 
-static SIMPLE_DEV_PM_OPS(titsc_pm_ops, titsc_suspend, titsc_resume);
+static const struct dev_pm_ops titsc_pm_ops = {
+	.suspend = titsc_suspend,
+	.resume  = titsc_resume,
+};
+#define TITSC_PM_OPS (&titsc_pm_ops)
+#else
+#define TITSC_PM_OPS NULL
+#endif
 
 static const struct of_device_id ti_tsc_dt_ids[] = {
 	{ .compatible = "ti,am3359-tsc", },
@@ -533,7 +543,7 @@ static struct platform_driver ti_tsc_driver = {
 	.remove	= titsc_remove,
 	.driver	= {
 		.name   = "TI-am335x-tsc",
-		.pm	= &titsc_pm_ops,
+		.pm	= TITSC_PM_OPS,
 		.of_match_table = ti_tsc_dt_ids,
 	},
 };

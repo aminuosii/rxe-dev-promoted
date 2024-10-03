@@ -1,7 +1,6 @@
-config RDMA_RXE
+config INFINIBAND_RXE
 	tristate "Software RDMA over Ethernet (RoCE) driver"
 	depends on INET && PCI && INFINIBAND
-	depends on NET_UDP_TUNNEL
 	---help---
 	This driver implements the InfiniBand RDMA transport over
 	the Linux network stack. It enables a system with a
@@ -18,7 +17,5 @@ config RDMA_RXE
 	space verbs API, libibverbs. The other layer interfaces
 	with the Linux network stack at layer 3.
 
-	To configure and work with soft-RoCE driver please use the
-	following wiki page under "configure Soft-RoCE (RXE)" section:
-
-	https://github.com/SoftRoCE/rxe-dev/wiki/rxe-dev:-Home
+	Rxe_cfg provided with librxe is a configuration tool that
+	loads and unloads the ib_rxe kernel modules

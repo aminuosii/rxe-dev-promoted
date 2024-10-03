@@ -1,6 +1,6 @@
 /*
- * Copyright (c) 2016 Mellanox Technologies Ltd. All rights reserved.
- * Copyright (c) 2015 System Fabric Works, Inc. All rights reserved.
+ * Copyright (c) 2009-2011 Mellanox Technologies Ltd. All rights reserved.
+ * Copyright (c) 2009-2011 System Fabric Works, Inc. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -95,10 +95,9 @@ void rxe_do_task(unsigned long data)
 				cont = 1;
 			break;
 
-		/* soneone tried to run the task since the last time we called
-		 * func, so we will call one more time regardless of the
-		 * return value
-		 */
+		/* soneone tried to run the task since the
+		   last time we called func, so we will call
+		   one more time regardless of the return value */
 		case TASK_STATE_ARMED:
 			task->state = TASK_STATE_BUSY;
 			cont = 1;

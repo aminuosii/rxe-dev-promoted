@@ -48,12 +48,17 @@
 #include <linux/tipc_netlink.h>
 #include "core.h"
 #include "bearer.h"
-#include "netlink.h"
 
 /* IANA assigned UDP port */
 #define UDP_PORT_DEFAULT	6118
 
-#define UDP_MIN_HEADROOM        48
+static const struct nla_policy tipc_nl_udp_policy[TIPC_NLA_UDP_MAX + 1] = {
+	[TIPC_NLA_UDP_UNSPEC]	= {.type = NLA_UNSPEC},
+	[TIPC_NLA_UDP_LOCAL]	= {.type = NLA_BINARY,
+				   .len = sizeof(struct sockaddr_storage)},
+	[TIPC_NLA_UDP_REMOTE]	= {.type = NLA_BINARY,
+				   .len = sizeof(struct sockaddr_storage)},
+};
 
 /**
  * struct udp_media_addr - IP/UDP addressing information
@@ -148,15 +153,11 @@ static int tipc_udp_send_msg(struct net *net, struct sk_buff *skb,
 	struct udp_bearer *ub;
 	struct udp_media_addr *dst = (struct udp_media_addr *)&dest->value;
 	struct udp_media_addr *src = (struct udp_media_addr *)&b->addr.value;
+	struct sk_buff *clone;
 	struct rtable *rt;
 
-	if (skb_headroom(skb) < UDP_MIN_HEADROOM) {
-		err = pskb_expand_head(skb, UDP_MIN_HEADROOM, 0, GFP_ATOMIC);
-		if (err)
-			goto tx_error;
-	}
-
-	skb_set_inner_protocol(skb, htons(ETH_P_TIPC));
+	clone = skb_clone(skb, GFP_ATOMIC);
+	skb_set_inner_protocol(clone, htons(ETH_P_TIPC));
 	ub = rcu_dereference_rtnl(b->media_ptr);
 	if (!ub) {
 		err = -ENODEV;
@@ -166,7 +167,7 @@ static int tipc_udp_send_msg(struct net *net, struct sk_buff *skb,
 		struct flowi4 fl = {
 			.daddr = dst->ipv4.s_addr,
 			.saddr = src->ipv4.s_addr,
-			.flowi4_mark = skb->mark,
+			.flowi4_mark = clone->mark,
 			.flowi4_proto = IPPROTO_UDP
 		};
 		rt = ip_route_output_key(net, &fl);
@@ -174,12 +175,16 @@ static int tipc_udp_send_msg(struct net *net, struct sk_buff *skb,
 			err = PTR_ERR(rt);
 			goto tx_error;
 		}
-
-		skb->dev = rt->dst.dev;
 		ttl = ip4_dst_hoplimit(&rt->dst);
-		udp_tunnel_xmit_skb(rt, ub->ubsock->sk, skb, src->ipv4.s_addr,
-				    dst->ipv4.s_addr, 0, ttl, 0, src->udp_port,
-				    dst->udp_port, false, true);
+		err = udp_tunnel_xmit_skb(rt, ub->ubsock->sk, clone,
+					  src->ipv4.s_addr,
+					  dst->ipv4.s_addr, 0, ttl, 0,
+					  src->udp_port, dst->udp_port,
+					  false, true);
+		if (err < 0) {
+			ip_rt_put(rt);
+			goto tx_error;
+		}
 #if IS_ENABLED(CONFIG_IPV6)
 	} else {
 		struct dst_entry *ndst;
@@ -189,21 +194,20 @@ static int tipc_udp_send_msg(struct net *net, struct sk_buff *skb,
 			.saddr = src->ipv6,
 			.flowi6_proto = IPPROTO_UDP
 		};
-		err = ipv6_stub->ipv6_dst_lookup(net, ub->ubsock->sk, &ndst,
-						 &fl6);
+		err = ipv6_stub->ipv6_dst_lookup(ub->ubsock->sk, &ndst, &fl6);
 		if (err)
 			goto tx_error;
 		ttl = ip6_dst_hoplimit(ndst);
-		err = udp_tunnel6_xmit_skb(ndst, ub->ubsock->sk, skb,
+		err = udp_tunnel6_xmit_skb(ndst, ub->ubsock->sk, clone,
 					   ndst->dev, &src->ipv6,
-					   &dst->ipv6, 0, ttl, 0, src->udp_port,
+					   &dst->ipv6, 0, ttl, src->udp_port,
 					   dst->udp_port, false);
 #endif
 	}
 	return err;
 
 tx_error:
-	kfree_skb(skb);
+	kfree_skb(clone);
 	return err;
 }
 
@@ -269,7 +273,7 @@ static int parse_options(struct nlattr *attrs[], struct udp_bearer *ub,
 			 struct udp_media_addr *remote)
 {
 	struct nlattr *opts[TIPC_NLA_UDP_MAX + 1];
-	struct sockaddr_storage sa_local, sa_remote;
+	struct sockaddr_storage *sa_local, *sa_remote;
 
 	if (!attrs[TIPC_NLA_BEARER_UDP_OPTS])
 		goto err;
@@ -278,48 +282,41 @@ static int parse_options(struct nlattr *attrs[], struct udp_bearer *ub,
 			     tipc_nl_udp_policy))
 		goto err;
 	if (opts[TIPC_NLA_UDP_LOCAL] && opts[TIPC_NLA_UDP_REMOTE]) {
-		nla_memcpy(&sa_local, opts[TIPC_NLA_UDP_LOCAL],
-			   sizeof(sa_local));
-		nla_memcpy(&sa_remote, opts[TIPC_NLA_UDP_REMOTE],
-			   sizeof(sa_remote));
+		sa_local = nla_data(opts[TIPC_NLA_UDP_LOCAL]);
+		sa_remote = nla_data(opts[TIPC_NLA_UDP_REMOTE]);
 	} else {
 err:
 		pr_err("Invalid UDP bearer configuration");
 		return -EINVAL;
 	}
-	if ((sa_local.ss_family & sa_remote.ss_family) == AF_INET) {
+	if ((sa_local->ss_family & sa_remote->ss_family) == AF_INET) {
 		struct sockaddr_in *ip4;
 
-		ip4 = (struct sockaddr_in *)&sa_local;
+		ip4 = (struct sockaddr_in *)sa_local;
 		local->proto = htons(ETH_P_IP);
 		local->udp_port = ip4->sin_port;
 		local->ipv4.s_addr = ip4->sin_addr.s_addr;
 
-		ip4 = (struct sockaddr_in *)&sa_remote;
+		ip4 = (struct sockaddr_in *)sa_remote;
 		remote->proto = htons(ETH_P_IP);
 		remote->udp_port = ip4->sin_port;
 		remote->ipv4.s_addr = ip4->sin_addr.s_addr;
 		return 0;
 
 #if IS_ENABLED(CONFIG_IPV6)
-	} else if ((sa_local.ss_family & sa_remote.ss_family) == AF_INET6) {
-		int atype;
+	} else if ((sa_local->ss_family & sa_remote->ss_family) == AF_INET6) {
 		struct sockaddr_in6 *ip6;
 
-		ip6 = (struct sockaddr_in6 *)&sa_local;
-		atype = ipv6_addr_type(&ip6->sin6_addr);
-		if (__ipv6_addr_needs_scope_id(atype) && !ip6->sin6_scope_id)
-			return -EINVAL;
-
+		ip6 = (struct sockaddr_in6 *)sa_local;
 		local->proto = htons(ETH_P_IPV6);
 		local->udp_port = ip6->sin6_port;
-		memcpy(&local->ipv6, &ip6->sin6_addr, sizeof(struct in6_addr));
+		local->ipv6 = ip6->sin6_addr;
 		ub->ifindex = ip6->sin6_scope_id;
 
-		ip6 = (struct sockaddr_in6 *)&sa_remote;
+		ip6 = (struct sockaddr_in6 *)sa_remote;
 		remote->proto = htons(ETH_P_IPV6);
 		remote->udp_port = ip6->sin6_port;
-		memcpy(&remote->ipv6, &ip6->sin6_addr, sizeof(struct in6_addr));
+		remote->ipv6 = ip6->sin6_addr;
 		return 0;
 #endif
 	}
@@ -427,6 +424,7 @@ static void tipc_udp_disable(struct tipc_bearer *b)
 	}
 	if (ub->ubsock)
 		sock_set_flag(ub->ubsock->sk, SOCK_DEAD);
+	RCU_INIT_POINTER(b->media_ptr, NULL);
 	RCU_INIT_POINTER(ub->bearer, NULL);
 
 	/* sock_release need to be done outside of rtnl lock */

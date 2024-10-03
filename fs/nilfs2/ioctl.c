@@ -13,7 +13,11 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  *
- * Written by Koji Sato.
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ *
+ * Written by Koji Sato <koji@osrg.net>.
  */
 
 #include <linux/fs.h>
@@ -154,7 +158,7 @@ static int nilfs_ioctl_setflags(struct inode *inode, struct file *filp,
 
 	flags = nilfs_mask_flags(inode->i_mode, flags);
 
-	inode_lock(inode);
+	mutex_lock(&inode->i_mutex);
 
 	oldflags = NILFS_I(inode)->i_flags;
 
@@ -182,7 +186,7 @@ static int nilfs_ioctl_setflags(struct inode *inode, struct file *filp,
 	nilfs_mark_inode_dirty(inode);
 	ret = nilfs_transaction_commit(inode->i_sb);
 out:
-	inode_unlock(inode);
+	mutex_unlock(&inode->i_mutex);
 	mnt_drop_write_file(filp);
 	return ret;
 }
@@ -779,7 +783,6 @@ static int nilfs_ioctl_mark_blocks_dirty(struct the_nilfs *nilfs,
 	size_t nmembs = argv->v_nmembs;
 	struct nilfs_bmap *bmap = NILFS_I(nilfs->ns_dat)->i_bmap;
 	struct nilfs_bdesc *bdescs = buf;
-	struct buffer_head *bh;
 	int ret, i;
 
 	for (i = 0; i < nmembs; i++) {
@@ -797,16 +800,12 @@ static int nilfs_ioctl_mark_blocks_dirty(struct the_nilfs *nilfs,
 			/* skip dead block */
 			continue;
 		if (bdescs[i].bd_level == 0) {
-			ret = nilfs_mdt_get_block(nilfs->ns_dat,
-						  bdescs[i].bd_offset,
-						  false, NULL, &bh);
-			if (unlikely(ret)) {
+			ret = nilfs_mdt_mark_block_dirty(nilfs->ns_dat,
+							 bdescs[i].bd_offset);
+			if (ret < 0) {
 				WARN_ON(ret == -ENOENT);
 				return ret;
 			}
-			mark_buffer_dirty(bh);
-			nilfs_mdt_mark_dirty(nilfs->ns_dat);
-			put_bh(bh);
 		} else {
 			ret = nilfs_bmap_mark(bmap, bdescs[i].bd_offset,
 					      bdescs[i].bd_level);
@@ -1370,6 +1369,7 @@ long nilfs_compat_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	case NILFS_IOCTL_SYNC:
 	case NILFS_IOCTL_RESIZE:
 	case NILFS_IOCTL_SET_ALLOC_RANGE:
+	case FITRIM:
 		break;
 	default:
 		return -ENOIOCTLCMD;

@@ -1,6 +1,6 @@
 /*
- * Copyright (c) 2016 Mellanox Technologies Ltd. All rights reserved.
- * Copyright (c) 2015 System Fabric Works, Inc. All rights reserved.
+ * Copyright (c) 2009-2011 Mellanox Technologies Ltd. All rights reserved.
+ * Copyright (c) 2009-2011 System Fabric Works, Inc. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -34,15 +34,13 @@
 #ifndef RXE_HDR_H
 #define RXE_HDR_H
 
-/* extracted information about a packet carried in an sk_buff struct fits in
- * the skbuff cb array. Must be at most 48 bytes. stored in control block of
- * sk_buff for received packets.
- */
+/* extracted information about a packet carried in an sk_buff struct
+   fits in the skbuff cb array. Must be at most 48 bytes. */
 struct rxe_pkt_info {
 	struct rxe_dev		*rxe;		/* device that owns packet */
 	struct rxe_qp		*qp;		/* qp that owns packet */
 	struct rxe_send_wqe	*wqe;		/* send wqe */
-	u8			*hdr;		/* points to bth */
+	u8			*hdr;		/* points to grh or bth */
 	u32			mask;		/* useful info about pkt */
 	u32			psn;		/* bth psn of packet */
 	u16			pkey_index;	/* partition of pkt */
@@ -52,16 +50,16 @@ struct rxe_pkt_info {
 	u8			offset;		/* bth offset from pkt->hdr */
 };
 
-/* Macros should be used only for received skb */
 #define SKB_TO_PKT(skb) ((struct rxe_pkt_info *)(skb)->cb)
-#define PKT_TO_SKB(pkt) container_of((void *)(pkt), struct sk_buff, cb)
+#define PKT_TO_SKB(pkt) ((struct sk_buff *)((char *)(pkt)	\
+			- offsetof(struct sk_buff, cb)))
 
 /*
  * IBA header types and methods
  *
  * Some of these are for reference and completeness only since
  * rxe does not currently support RD transport
- * most of this could be moved into IB core. ib_pack.h has
+ * most of this could be moved into OFED core. ib_pack.h has
  * part of this but is incomplete
  *
  * Header specific routines to insert/extract values to/from headers
@@ -888,7 +886,7 @@ static inline void immdt_set_imm(struct rxe_pkt_info *pkt, __be32 imm)
 }
 
 /******************************************************************************
- * Invalidate Extended Transport Header
+ * Invalid Extended Transport Header
  ******************************************************************************/
 struct rxe_ieth {
 	__be32			rkey;

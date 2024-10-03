@@ -29,7 +29,6 @@
 #include <linux/kdebug.h>
 #include <asm/processor.h>
 #include <asm/insn.h>
-#include <asm/mmu_context.h>
 
 /* Post-execution fixups. */
 
@@ -313,6 +312,11 @@ static int uprobe_init_insn(struct arch_uprobe *auprobe, struct insn *insn, bool
 }
 
 #ifdef CONFIG_X86_64
+static inline bool is_64bit_mm(struct mm_struct *mm)
+{
+	return	!config_enabled(CONFIG_IA32_EMULATION) ||
+		!(mm->context.ia32_compat == TIF_IA32);
+}
 /*
  * If arch_uprobe->insn doesn't use rip-relative addressing, return
  * immediately.  Otherwise, rewrite the instruction so that it accesses
@@ -493,6 +497,10 @@ static void riprel_post_xol(struct arch_uprobe *auprobe, struct pt_regs *regs)
 	}
 }
 #else /* 32-bit: */
+static inline bool is_64bit_mm(struct mm_struct *mm)
+{
+	return false;
+}
 /*
  * No RIP-relative addressing on 32-bit
  */
@@ -516,7 +524,7 @@ struct uprobe_xol_ops {
 
 static inline int sizeof_long(void)
 {
-	return in_ia32_syscall() ? 4 : 8;
+	return is_ia32_task() ? 4 : 8;
 }
 
 static int default_pre_xol_op(struct arch_uprobe *auprobe, struct pt_regs *regs)
@@ -578,7 +586,7 @@ static void default_abort_op(struct arch_uprobe *auprobe, struct pt_regs *regs)
 	riprel_post_xol(auprobe, regs);
 }
 
-static const struct uprobe_xol_ops default_xol_ops = {
+static struct uprobe_xol_ops default_xol_ops = {
 	.pre_xol  = default_pre_xol_op,
 	.post_xol = default_post_xol_op,
 	.abort	  = default_abort_op,
@@ -695,7 +703,7 @@ static void branch_clear_offset(struct arch_uprobe *auprobe, struct insn *insn)
 		0, insn->immediate.nbytes);
 }
 
-static const struct uprobe_xol_ops branch_xol_ops = {
+static struct uprobe_xol_ops branch_xol_ops = {
 	.emulate  = branch_emulate_op,
 	.post_xol = branch_post_xol_op,
 };
@@ -984,13 +992,4 @@ arch_uretprobe_hijack_return_addr(unsigned long trampoline_vaddr, struct pt_regs
 	}
 
 	return -1;
-}
-
-bool arch_uretprobe_is_alive(struct return_instance *ret, enum rp_check ctx,
-				struct pt_regs *regs)
-{
-	if (ctx == RP_CHECK_CALL) /* sp was just decremented by "call" insn */
-		return regs->sp < ret->stack;
-	else
-		return regs->sp <= ret->stack;
 }

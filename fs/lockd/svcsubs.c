@@ -31,7 +31,7 @@
 static struct hlist_head	nlm_files[FILE_NRHASH];
 static DEFINE_MUTEX(nlm_file_mutex);
 
-#ifdef CONFIG_SUNRPC_DEBUG
+#ifdef NFSD_DEBUG
 static inline void nlm_debug_print_fh(char *msg, struct nfs_fh *f)
 {
 	u32 *fhp = (u32*)f->data;

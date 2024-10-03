@@ -2,7 +2,7 @@
  * Copyright (C) 2013 Huawei Ltd.
  * Author: Jiang Liu <liuj97@gmail.com>
  *
- * Copyright (C) 2014-2016 Zi Shen Lim <zlim.lnx@gmail.com>
+ * Copyright (C) 2014 Zi Shen Lim <zlim.lnx@gmail.com>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -77,15 +77,7 @@ bool __kprobes aarch64_insn_is_nop(u32 insn)
 	}
 }
 
-bool aarch64_insn_is_branch_imm(u32 insn)
-{
-	return (aarch64_insn_is_b(insn) || aarch64_insn_is_bl(insn) ||
-		aarch64_insn_is_tbz(insn) || aarch64_insn_is_tbnz(insn) ||
-		aarch64_insn_is_cbz(insn) || aarch64_insn_is_cbnz(insn) ||
-		aarch64_insn_is_bcond(insn));
-}
-
-static DEFINE_RAW_SPINLOCK(patch_lock);
+static DEFINE_SPINLOCK(patch_lock);
 
 static void __kprobes *patch_map(void *addr, int fixmap)
 {
@@ -96,13 +88,14 @@ static void __kprobes *patch_map(void *addr, int fixmap)
 	if (module && IS_ENABLED(CONFIG_DEBUG_SET_MODULE_RONX))
 		page = vmalloc_to_page(addr);
 	else if (!module && IS_ENABLED(CONFIG_DEBUG_RODATA))
-		page = pfn_to_page(PHYS_PFN(__pa(addr)));
+		page = virt_to_page(addr);
 	else
 		return addr;
 
 	BUG_ON(!page);
-	return (void *)set_fixmap_offset(fixmap, page_to_phys(page) +
-			(uintaddr & ~PAGE_MASK));
+	set_fixmap(fixmap, page_to_phys(page));
+
+	return (void *) (__fix_to_virt(fixmap) + (uintaddr & ~PAGE_MASK));
 }
 
 static void __kprobes patch_unmap(int fixmap)
@@ -131,13 +124,13 @@ static int __kprobes __aarch64_insn_write(void *addr, u32 insn)
 	unsigned long flags = 0;
 	int ret;
 
-	raw_spin_lock_irqsave(&patch_lock, flags);
+	spin_lock_irqsave(&patch_lock, flags);
 	waddr = patch_map(addr, FIX_TEXT_POKE0);
 
 	ret = probe_kernel_write(waddr, &insn, AARCH64_INSN_SIZE);
 
 	patch_unmap(FIX_TEXT_POKE0);
-	raw_spin_unlock_irqrestore(&patch_lock, flags);
+	spin_unlock_irqrestore(&patch_lock, flags);
 
 	return ret;
 }
@@ -363,9 +356,6 @@ u32 __kprobes aarch64_insn_encode_immediate(enum aarch64_insn_imm_type type,
 	u32 immlo, immhi, mask;
 	int shift;
 
-	if (insn == AARCH64_BREAK_FAULT)
-		return AARCH64_BREAK_FAULT;
-
 	switch (type) {
 	case AARCH64_INSN_IMM_ADR:
 		shift = 0;
@@ -380,7 +370,7 @@ u32 __kprobes aarch64_insn_encode_immediate(enum aarch64_insn_imm_type type,
 		if (aarch64_get_imm_shift_mask(type, &mask, &shift) < 0) {
 			pr_err("aarch64_insn_encode_immediate: unknown immediate encoding %d\n",
 			       type);
-			return AARCH64_BREAK_FAULT;
+			return 0;
 		}
 	}
 
@@ -397,12 +387,9 @@ static u32 aarch64_insn_encode_register(enum aarch64_insn_register_type type,
 {
 	int shift;
 
-	if (insn == AARCH64_BREAK_FAULT)
-		return AARCH64_BREAK_FAULT;
-
 	if (reg < AARCH64_INSN_REG_0 || reg > AARCH64_INSN_REG_SP) {
 		pr_err("%s: unknown register encoding %d\n", __func__, reg);
-		return AARCH64_BREAK_FAULT;
+		return 0;
 	}
 
 	switch (type) {
@@ -423,7 +410,7 @@ static u32 aarch64_insn_encode_register(enum aarch64_insn_register_type type,
 	default:
 		pr_err("%s: unknown register type encoding %d\n", __func__,
 		       type);
-		return AARCH64_BREAK_FAULT;
+		return 0;
 	}
 
 	insn &= ~(GENMASK(4, 0) << shift);
@@ -452,7 +439,7 @@ static u32 aarch64_insn_encode_ldst_size(enum aarch64_insn_size_type type,
 		break;
 	default:
 		pr_err("%s: unknown size encoding %d\n", __func__, type);
-		return AARCH64_BREAK_FAULT;
+		return 0;
 	}
 
 	insn &= ~GENMASK(31, 30);
@@ -466,17 +453,14 @@ static inline long branch_imm_common(unsigned long pc, unsigned long addr,
 {
 	long offset;
 
-	if ((pc & 0x3) || (addr & 0x3)) {
-		pr_err("%s: A64 instructions must be word aligned\n", __func__);
-		return range;
-	}
+	/*
+	 * PC: A 64-bit Program Counter holding the address of the current
+	 * instruction. A64 instructions must be word-aligned.
+	 */
+	BUG_ON((pc & 0x3) || (addr & 0x3));
 
 	offset = ((long)addr - (long)pc);
-
-	if (offset < -range || offset >= range) {
-		pr_err("%s: offset out of range\n", __func__);
-		return range;
-	}
+	BUG_ON(offset < -range || offset >= range);
 
 	return offset;
 }
@@ -493,8 +477,6 @@ u32 __kprobes aarch64_insn_gen_branch_imm(unsigned long pc, unsigned long addr,
 	 * texts are within +/-128M.
 	 */
 	offset = branch_imm_common(pc, addr, SZ_128M);
-	if (offset >= SZ_128M)
-		return AARCH64_BREAK_FAULT;
 
 	switch (type) {
 	case AARCH64_INSN_BRANCH_LINK:
@@ -504,7 +486,7 @@ u32 __kprobes aarch64_insn_gen_branch_imm(unsigned long pc, unsigned long addr,
 		insn = aarch64_insn_get_b_value();
 		break;
 	default:
-		pr_err("%s: unknown branch encoding %d\n", __func__, type);
+		BUG_ON(1);
 		return AARCH64_BREAK_FAULT;
 	}
 
@@ -521,8 +503,6 @@ u32 aarch64_insn_gen_comp_branch_imm(unsigned long pc, unsigned long addr,
 	long offset;
 
 	offset = branch_imm_common(pc, addr, SZ_1M);
-	if (offset >= SZ_1M)
-		return AARCH64_BREAK_FAULT;
 
 	switch (type) {
 	case AARCH64_INSN_BRANCH_COMP_ZERO:
@@ -532,7 +512,7 @@ u32 aarch64_insn_gen_comp_branch_imm(unsigned long pc, unsigned long addr,
 		insn = aarch64_insn_get_cbnz_value();
 		break;
 	default:
-		pr_err("%s: unknown branch encoding %d\n", __func__, type);
+		BUG_ON(1);
 		return AARCH64_BREAK_FAULT;
 	}
 
@@ -543,7 +523,7 @@ u32 aarch64_insn_gen_comp_branch_imm(unsigned long pc, unsigned long addr,
 		insn |= AARCH64_INSN_SF_BIT;
 		break;
 	default:
-		pr_err("%s: unknown variant encoding %d\n", __func__, variant);
+		BUG_ON(1);
 		return AARCH64_BREAK_FAULT;
 	}
 
@@ -563,10 +543,7 @@ u32 aarch64_insn_gen_cond_branch_imm(unsigned long pc, unsigned long addr,
 
 	insn = aarch64_insn_get_bcond_value();
 
-	if (cond < AARCH64_INSN_COND_EQ || cond > AARCH64_INSN_COND_AL) {
-		pr_err("%s: unknown condition encoding %d\n", __func__, cond);
-		return AARCH64_BREAK_FAULT;
-	}
+	BUG_ON(cond < AARCH64_INSN_COND_EQ || cond > AARCH64_INSN_COND_AL);
 	insn |= cond;
 
 	return aarch64_insn_encode_immediate(AARCH64_INSN_IMM_19, insn,
@@ -599,7 +576,7 @@ u32 aarch64_insn_gen_branch_reg(enum aarch64_insn_register reg,
 		insn = aarch64_insn_get_ret_value();
 		break;
 	default:
-		pr_err("%s: unknown branch encoding %d\n", __func__, type);
+		BUG_ON(1);
 		return AARCH64_BREAK_FAULT;
 	}
 
@@ -622,7 +599,7 @@ u32 aarch64_insn_gen_load_store_reg(enum aarch64_insn_register reg,
 		insn = aarch64_insn_get_str_reg_value();
 		break;
 	default:
-		pr_err("%s: unknown load/store encoding %d\n", __func__, type);
+		BUG_ON(1);
 		return AARCH64_BREAK_FAULT;
 	}
 
@@ -661,30 +638,26 @@ u32 aarch64_insn_gen_load_store_pair(enum aarch64_insn_register reg1,
 		insn = aarch64_insn_get_stp_post_value();
 		break;
 	default:
-		pr_err("%s: unknown load/store encoding %d\n", __func__, type);
+		BUG_ON(1);
 		return AARCH64_BREAK_FAULT;
 	}
 
 	switch (variant) {
 	case AARCH64_INSN_VARIANT_32BIT:
-		if ((offset & 0x3) || (offset < -256) || (offset > 252)) {
-			pr_err("%s: offset must be multiples of 4 in the range of [-256, 252] %d\n",
-			       __func__, offset);
-			return AARCH64_BREAK_FAULT;
-		}
+		/* offset must be multiples of 4 in the range [-256, 252] */
+		BUG_ON(offset & 0x3);
+		BUG_ON(offset < -256 || offset > 252);
 		shift = 2;
 		break;
 	case AARCH64_INSN_VARIANT_64BIT:
-		if ((offset & 0x7) || (offset < -512) || (offset > 504)) {
-			pr_err("%s: offset must be multiples of 8 in the range of [-512, 504] %d\n",
-			       __func__, offset);
-			return AARCH64_BREAK_FAULT;
-		}
+		/* offset must be multiples of 8 in the range [-512, 504] */
+		BUG_ON(offset & 0x7);
+		BUG_ON(offset < -512 || offset > 504);
 		shift = 3;
 		insn |= AARCH64_INSN_SF_BIT;
 		break;
 	default:
-		pr_err("%s: unknown variant encoding %d\n", __func__, variant);
+		BUG_ON(1);
 		return AARCH64_BREAK_FAULT;
 	}
 
@@ -722,7 +695,7 @@ u32 aarch64_insn_gen_add_sub_imm(enum aarch64_insn_register dst,
 		insn = aarch64_insn_get_subs_imm_value();
 		break;
 	default:
-		pr_err("%s: unknown add/sub encoding %d\n", __func__, type);
+		BUG_ON(1);
 		return AARCH64_BREAK_FAULT;
 	}
 
@@ -733,14 +706,11 @@ u32 aarch64_insn_gen_add_sub_imm(enum aarch64_insn_register dst,
 		insn |= AARCH64_INSN_SF_BIT;
 		break;
 	default:
-		pr_err("%s: unknown variant encoding %d\n", __func__, variant);
+		BUG_ON(1);
 		return AARCH64_BREAK_FAULT;
 	}
 
-	if (imm & ~(SZ_4K - 1)) {
-		pr_err("%s: invalid immediate encoding %d\n", __func__, imm);
-		return AARCH64_BREAK_FAULT;
-	}
+	BUG_ON(imm & ~(SZ_4K - 1));
 
 	insn = aarch64_insn_encode_register(AARCH64_INSN_REGTYPE_RD, insn, dst);
 
@@ -769,7 +739,7 @@ u32 aarch64_insn_gen_bitfield(enum aarch64_insn_register dst,
 		insn = aarch64_insn_get_sbfm_value();
 		break;
 	default:
-		pr_err("%s: unknown bitfield encoding %d\n", __func__, type);
+		BUG_ON(1);
 		return AARCH64_BREAK_FAULT;
 	}
 
@@ -782,18 +752,12 @@ u32 aarch64_insn_gen_bitfield(enum aarch64_insn_register dst,
 		mask = GENMASK(5, 0);
 		break;
 	default:
-		pr_err("%s: unknown variant encoding %d\n", __func__, variant);
+		BUG_ON(1);
 		return AARCH64_BREAK_FAULT;
 	}
 
-	if (immr & ~mask) {
-		pr_err("%s: invalid immr encoding %d\n", __func__, immr);
-		return AARCH64_BREAK_FAULT;
-	}
-	if (imms & ~mask) {
-		pr_err("%s: invalid imms encoding %d\n", __func__, imms);
-		return AARCH64_BREAK_FAULT;
-	}
+	BUG_ON(immr & ~mask);
+	BUG_ON(imms & ~mask);
 
 	insn = aarch64_insn_encode_register(AARCH64_INSN_REGTYPE_RD, insn, dst);
 
@@ -822,33 +786,23 @@ u32 aarch64_insn_gen_movewide(enum aarch64_insn_register dst,
 		insn = aarch64_insn_get_movn_value();
 		break;
 	default:
-		pr_err("%s: unknown movewide encoding %d\n", __func__, type);
+		BUG_ON(1);
 		return AARCH64_BREAK_FAULT;
 	}
 
-	if (imm & ~(SZ_64K - 1)) {
-		pr_err("%s: invalid immediate encoding %d\n", __func__, imm);
-		return AARCH64_BREAK_FAULT;
-	}
+	BUG_ON(imm & ~(SZ_64K - 1));
 
 	switch (variant) {
 	case AARCH64_INSN_VARIANT_32BIT:
-		if (shift != 0 && shift != 16) {
-			pr_err("%s: invalid shift encoding %d\n", __func__,
-			       shift);
-			return AARCH64_BREAK_FAULT;
-		}
+		BUG_ON(shift != 0 && shift != 16);
 		break;
 	case AARCH64_INSN_VARIANT_64BIT:
 		insn |= AARCH64_INSN_SF_BIT;
-		if (shift != 0 && shift != 16 && shift != 32 && shift != 48) {
-			pr_err("%s: invalid shift encoding %d\n", __func__,
-			       shift);
-			return AARCH64_BREAK_FAULT;
-		}
+		BUG_ON(shift != 0 && shift != 16 && shift != 32 &&
+		       shift != 48);
 		break;
 	default:
-		pr_err("%s: unknown variant encoding %d\n", __func__, variant);
+		BUG_ON(1);
 		return AARCH64_BREAK_FAULT;
 	}
 
@@ -882,28 +836,20 @@ u32 aarch64_insn_gen_add_sub_shifted_reg(enum aarch64_insn_register dst,
 		insn = aarch64_insn_get_subs_value();
 		break;
 	default:
-		pr_err("%s: unknown add/sub encoding %d\n", __func__, type);
+		BUG_ON(1);
 		return AARCH64_BREAK_FAULT;
 	}
 
 	switch (variant) {
 	case AARCH64_INSN_VARIANT_32BIT:
-		if (shift & ~(SZ_32 - 1)) {
-			pr_err("%s: invalid shift encoding %d\n", __func__,
-			       shift);
-			return AARCH64_BREAK_FAULT;
-		}
+		BUG_ON(shift & ~(SZ_32 - 1));
 		break;
 	case AARCH64_INSN_VARIANT_64BIT:
 		insn |= AARCH64_INSN_SF_BIT;
-		if (shift & ~(SZ_64 - 1)) {
-			pr_err("%s: invalid shift encoding %d\n", __func__,
-			       shift);
-			return AARCH64_BREAK_FAULT;
-		}
+		BUG_ON(shift & ~(SZ_64 - 1));
 		break;
 	default:
-		pr_err("%s: unknown variant encoding %d\n", __func__, variant);
+		BUG_ON(1);
 		return AARCH64_BREAK_FAULT;
 	}
 
@@ -932,15 +878,11 @@ u32 aarch64_insn_gen_data1(enum aarch64_insn_register dst,
 		insn = aarch64_insn_get_rev32_value();
 		break;
 	case AARCH64_INSN_DATA1_REVERSE_64:
-		if (variant != AARCH64_INSN_VARIANT_64BIT) {
-			pr_err("%s: invalid variant for reverse64 %d\n",
-			       __func__, variant);
-			return AARCH64_BREAK_FAULT;
-		}
+		BUG_ON(variant != AARCH64_INSN_VARIANT_64BIT);
 		insn = aarch64_insn_get_rev64_value();
 		break;
 	default:
-		pr_err("%s: unknown data1 encoding %d\n", __func__, type);
+		BUG_ON(1);
 		return AARCH64_BREAK_FAULT;
 	}
 
@@ -951,7 +893,7 @@ u32 aarch64_insn_gen_data1(enum aarch64_insn_register dst,
 		insn |= AARCH64_INSN_SF_BIT;
 		break;
 	default:
-		pr_err("%s: unknown variant encoding %d\n", __func__, variant);
+		BUG_ON(1);
 		return AARCH64_BREAK_FAULT;
 	}
 
@@ -988,7 +930,7 @@ u32 aarch64_insn_gen_data2(enum aarch64_insn_register dst,
 		insn = aarch64_insn_get_rorv_value();
 		break;
 	default:
-		pr_err("%s: unknown data2 encoding %d\n", __func__, type);
+		BUG_ON(1);
 		return AARCH64_BREAK_FAULT;
 	}
 
@@ -999,7 +941,7 @@ u32 aarch64_insn_gen_data2(enum aarch64_insn_register dst,
 		insn |= AARCH64_INSN_SF_BIT;
 		break;
 	default:
-		pr_err("%s: unknown variant encoding %d\n", __func__, variant);
+		BUG_ON(1);
 		return AARCH64_BREAK_FAULT;
 	}
 
@@ -1027,7 +969,7 @@ u32 aarch64_insn_gen_data3(enum aarch64_insn_register dst,
 		insn = aarch64_insn_get_msub_value();
 		break;
 	default:
-		pr_err("%s: unknown data3 encoding %d\n", __func__, type);
+		BUG_ON(1);
 		return AARCH64_BREAK_FAULT;
 	}
 
@@ -1038,7 +980,7 @@ u32 aarch64_insn_gen_data3(enum aarch64_insn_register dst,
 		insn |= AARCH64_INSN_SF_BIT;
 		break;
 	default:
-		pr_err("%s: unknown variant encoding %d\n", __func__, variant);
+		BUG_ON(1);
 		return AARCH64_BREAK_FAULT;
 	}
 
@@ -1088,28 +1030,20 @@ u32 aarch64_insn_gen_logical_shifted_reg(enum aarch64_insn_register dst,
 		insn = aarch64_insn_get_bics_value();
 		break;
 	default:
-		pr_err("%s: unknown logical encoding %d\n", __func__, type);
+		BUG_ON(1);
 		return AARCH64_BREAK_FAULT;
 	}
 
 	switch (variant) {
 	case AARCH64_INSN_VARIANT_32BIT:
-		if (shift & ~(SZ_32 - 1)) {
-			pr_err("%s: invalid shift encoding %d\n", __func__,
-			       shift);
-			return AARCH64_BREAK_FAULT;
-		}
+		BUG_ON(shift & ~(SZ_32 - 1));
 		break;
 	case AARCH64_INSN_VARIANT_64BIT:
 		insn |= AARCH64_INSN_SF_BIT;
-		if (shift & ~(SZ_64 - 1)) {
-			pr_err("%s: invalid shift encoding %d\n", __func__,
-			       shift);
-			return AARCH64_BREAK_FAULT;
-		}
+		BUG_ON(shift & ~(SZ_64 - 1));
 		break;
 	default:
-		pr_err("%s: unknown variant encoding %d\n", __func__, variant);
+		BUG_ON(1);
 		return AARCH64_BREAK_FAULT;
 	}
 
@@ -1121,58 +1055,6 @@ u32 aarch64_insn_gen_logical_shifted_reg(enum aarch64_insn_register dst,
 	insn = aarch64_insn_encode_register(AARCH64_INSN_REGTYPE_RM, insn, reg);
 
 	return aarch64_insn_encode_immediate(AARCH64_INSN_IMM_6, insn, shift);
-}
-
-/*
- * Decode the imm field of a branch, and return the byte offset as a
- * signed value (so it can be used when computing a new branch
- * target).
- */
-s32 aarch64_get_branch_offset(u32 insn)
-{
-	s32 imm;
-
-	if (aarch64_insn_is_b(insn) || aarch64_insn_is_bl(insn)) {
-		imm = aarch64_insn_decode_immediate(AARCH64_INSN_IMM_26, insn);
-		return (imm << 6) >> 4;
-	}
-
-	if (aarch64_insn_is_cbz(insn) || aarch64_insn_is_cbnz(insn) ||
-	    aarch64_insn_is_bcond(insn)) {
-		imm = aarch64_insn_decode_immediate(AARCH64_INSN_IMM_19, insn);
-		return (imm << 13) >> 11;
-	}
-
-	if (aarch64_insn_is_tbz(insn) || aarch64_insn_is_tbnz(insn)) {
-		imm = aarch64_insn_decode_immediate(AARCH64_INSN_IMM_14, insn);
-		return (imm << 18) >> 16;
-	}
-
-	/* Unhandled instruction */
-	BUG();
-}
-
-/*
- * Encode the displacement of a branch in the imm field and return the
- * updated instruction.
- */
-u32 aarch64_set_branch_offset(u32 insn, s32 offset)
-{
-	if (aarch64_insn_is_b(insn) || aarch64_insn_is_bl(insn))
-		return aarch64_insn_encode_immediate(AARCH64_INSN_IMM_26, insn,
-						     offset >> 2);
-
-	if (aarch64_insn_is_cbz(insn) || aarch64_insn_is_cbnz(insn) ||
-	    aarch64_insn_is_bcond(insn))
-		return aarch64_insn_encode_immediate(AARCH64_INSN_IMM_19, insn,
-						     offset >> 2);
-
-	if (aarch64_insn_is_tbz(insn) || aarch64_insn_is_tbnz(insn))
-		return aarch64_insn_encode_immediate(AARCH64_INSN_IMM_14, insn,
-						     offset >> 2);
-
-	/* Unhandled instruction */
-	BUG();
 }
 
 bool aarch32_insn_is_wide(u32 insn)

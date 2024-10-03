@@ -41,8 +41,7 @@ ocfs2-objs := \
 	quota_local.o		\
 	quota_global.o		\
 	xattr.o			\
-	acl.o	\
-	filecheck.o
+	acl.o
 
 ocfs2_stackglue-objs := stackglue.o
 ocfs2_stack_o2cb-objs := stack_o2cb.o

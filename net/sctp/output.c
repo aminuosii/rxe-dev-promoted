@@ -153,7 +153,7 @@ void sctp_packet_free(struct sctp_packet *packet)
  */
 sctp_xmit_t sctp_packet_transmit_chunk(struct sctp_packet *packet,
 				       struct sctp_chunk *chunk,
-				       int one_packet, gfp_t gfp)
+				       int one_packet)
 {
 	sctp_xmit_t retval;
 	int error = 0;
@@ -163,7 +163,7 @@ sctp_xmit_t sctp_packet_transmit_chunk(struct sctp_packet *packet,
 	switch ((retval = (sctp_packet_append_chunk(packet, chunk)))) {
 	case SCTP_XMIT_PMTU_FULL:
 		if (!packet->has_cookie_echo) {
-			error = sctp_packet_transmit(packet, gfp);
+			error = sctp_packet_transmit(packet);
 			if (error < 0)
 				chunk->skb->sk->sk_err = -error;
 
@@ -376,7 +376,7 @@ static void sctp_packet_set_owner_w(struct sk_buff *skb, struct sock *sk)
  *
  * The return value is a normal kernel error return value.
  */
-int sctp_packet_transmit(struct sctp_packet *packet, gfp_t gfp)
+int sctp_packet_transmit(struct sctp_packet *packet)
 {
 	struct sctp_transport *tp = packet->transport;
 	struct sctp_association *asoc = tp->asoc;
@@ -401,7 +401,7 @@ int sctp_packet_transmit(struct sctp_packet *packet, gfp_t gfp)
 	sk = chunk->skb->sk;
 
 	/* Allocate the new skb.  */
-	nskb = alloc_skb(packet->size + MAX_HEADER, gfp);
+	nskb = alloc_skb(packet->size + MAX_HEADER, GFP_ATOMIC);
 	if (!nskb)
 		goto nomem;
 
@@ -523,8 +523,8 @@ int sctp_packet_transmit(struct sctp_packet *packet, gfp_t gfp)
 	 */
 	if (auth)
 		sctp_auth_calculate_hmac(asoc, nskb,
-					 (struct sctp_auth_chunk *)auth,
-					 gfp);
+					(struct sctp_auth_chunk *)auth,
+					GFP_ATOMIC);
 
 	/* 2) Calculate the Adler-32 checksum of the whole packet,
 	 *    including the SCTP common header and all the
@@ -534,7 +534,7 @@ int sctp_packet_transmit(struct sctp_packet *packet, gfp_t gfp)
 	 * by CRC32-C as described in <draft-ietf-tsvwg-sctpcsum-02.txt>.
 	 */
 	if (!sctp_checksum_disable) {
-		if (!(dst->dev->features & NETIF_F_SCTP_CRC) ||
+		if (!(dst->dev->features & NETIF_F_SCTP_CSUM) ||
 		    (dst_xfrm(dst) != NULL) || packet->ipfragok) {
 			sh->checksum = sctp_compute_cksum(nskb, 0);
 		} else {
@@ -599,9 +599,7 @@ out:
 	return err;
 no_route:
 	kfree_skb(nskb);
-
-	if (asoc)
-		IP_INC_STATS(sock_net(asoc->base.sk), IPSTATS_MIB_OUTNOROUTES);
+	IP_INC_STATS(sock_net(asoc->base.sk), IPSTATS_MIB_OUTNOROUTES);
 
 	/* FIXME: Returning the 'err' will effect all the associations
 	 * associated with a socket, although only one of the paths of the
@@ -705,8 +703,7 @@ static sctp_xmit_t sctp_packet_can_append_data(struct sctp_packet *packet,
 	/* Check whether this chunk and all the rest of pending data will fit
 	 * or delay in hopes of bundling a full sized packet.
 	 */
-	if (chunk->skb->len + q->out_qlen >
-		transport->pathmtu - packet->overhead - sizeof(sctp_data_chunk_t) - 4)
+	if (chunk->skb->len + q->out_qlen >= transport->pathmtu - packet->overhead)
 		/* Enough data queued to fill a packet */
 		return SCTP_XMIT_OK;
 

@@ -476,12 +476,13 @@ static void __lpc_get_mac(struct netdata_local *pldat, u8 *mac)
 	mac[5] = tmp >> 8;
 }
 
-static void __lpc_eth_clock_enable(struct netdata_local *pldat, bool enable)
+static void __lpc_eth_clock_enable(struct netdata_local *pldat,
+				   bool enable)
 {
 	if (enable)
-		clk_prepare_enable(pldat->clk);
+		clk_enable(pldat->clk);
 	else
-		clk_disable_unprepare(pldat->clk);
+		clk_disable(pldat->clk);
 }
 
 static void __lpc_params_setup(struct netdata_local *pldat)
@@ -797,7 +798,7 @@ static int lpc_mii_probe(struct net_device *ndev)
 		netdev_info(ndev, "using MII interface\n");
 	else
 		netdev_info(ndev, "using RMII interface\n");
-	phydev = phy_connect(ndev, phydev_name(phydev),
+	phydev = phy_connect(ndev, dev_name(&phydev->dev),
 			     &lpc_handle_link_change,
 			     lpc_phy_interface_mode(&pldat->pdev->dev));
 
@@ -816,14 +817,15 @@ static int lpc_mii_probe(struct net_device *ndev)
 	pldat->duplex = -1;
 	pldat->phy_dev = phydev;
 
-	phy_attached_info(phydev);
-
+	netdev_info(ndev,
+		"attached PHY driver [%s] (mii_bus:phy_addr=%s, irq=%d)\n",
+		phydev->drv->name, dev_name(&phydev->dev), phydev->irq);
 	return 0;
 }
 
 static int lpc_mii_init(struct netdata_local *pldat)
 {
-	int err = -ENXIO;
+	int err = -ENXIO, i;
 
 	pldat->mii_bus = mdiobus_alloc();
 	if (!pldat->mii_bus) {
@@ -850,10 +852,19 @@ static int lpc_mii_init(struct netdata_local *pldat)
 	pldat->mii_bus->priv = pldat;
 	pldat->mii_bus->parent = &pldat->pdev->dev;
 
+	pldat->mii_bus->irq = kmalloc(sizeof(int) * PHY_MAX_ADDR, GFP_KERNEL);
+	if (!pldat->mii_bus->irq) {
+		err = -ENOMEM;
+		goto err_out_1;
+	}
+
+	for (i = 0; i < PHY_MAX_ADDR; i++)
+		pldat->mii_bus->irq[i] = PHY_POLL;
+
 	platform_set_drvdata(pldat->pdev, pldat->mii_bus);
 
 	if (mdiobus_register(pldat->mii_bus))
-		goto err_out_unregister_bus;
+		goto err_out_free_mdio_irq;
 
 	if (lpc_mii_probe(pldat->ndev) != 0)
 		goto err_out_unregister_bus;
@@ -862,6 +873,9 @@ static int lpc_mii_init(struct netdata_local *pldat)
 
 err_out_unregister_bus:
 	mdiobus_unregister(pldat->mii_bus);
+err_out_free_mdio_irq:
+	kfree(pldat->mii_bus->irq);
+err_out_1:
 	mdiobus_free(pldat->mii_bus);
 err_out:
 	return err;
@@ -1313,7 +1327,7 @@ static int lpc_eth_drv_probe(struct platform_device *pdev)
 	/* Get platform resources */
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	irq = platform_get_irq(pdev, 0);
-	if (!res || irq < 0) {
+	if ((!res) || (irq < 0) || (irq >= NR_IRQS)) {
 		dev_err(&pdev->dev, "error getting resources.\n");
 		ret = -ENXIO;
 		goto err_exit;
@@ -1480,7 +1494,7 @@ err_out_free_irq:
 err_out_iounmap:
 	iounmap(pldat->net_base);
 err_out_disable_clocks:
-	clk_disable_unprepare(pldat->clk);
+	clk_disable(pldat->clk);
 	clk_put(pldat->clk);
 err_out_free_dev:
 	free_netdev(ndev);
@@ -1505,7 +1519,7 @@ static int lpc_eth_drv_remove(struct platform_device *pdev)
 	iounmap(pldat->net_base);
 	mdiobus_unregister(pldat->mii_bus);
 	mdiobus_free(pldat->mii_bus);
-	clk_disable_unprepare(pldat->clk);
+	clk_disable(pldat->clk);
 	clk_put(pldat->clk);
 	free_netdev(ndev);
 
@@ -1526,7 +1540,7 @@ static int lpc_eth_drv_suspend(struct platform_device *pdev,
 		if (netif_running(ndev)) {
 			netif_device_detach(ndev);
 			__lpc_eth_shutdown(pldat);
-			clk_disable_unprepare(pldat->clk);
+			clk_disable(pldat->clk);
 
 			/*
 			 * Reset again now clock is disable to be sure

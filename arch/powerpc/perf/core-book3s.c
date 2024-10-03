@@ -48,12 +48,12 @@ struct cpu_hw_events {
 	unsigned long amasks[MAX_HWEVENTS][MAX_EVENT_ALTERNATIVES];
 	unsigned long avalues[MAX_HWEVENTS][MAX_EVENT_ALTERNATIVES];
 
-	unsigned int txn_flags;
+	unsigned int group_flag;
 	int n_txn_start;
 
 	/* BHRB bits */
 	u64				bhrb_filter;	/* BHRB HW branch filter */
-	unsigned int			bhrb_users;
+	int				bhrb_users;
 	void				*bhrb_context;
 	struct	perf_branch_stack	bhrb_stack;
 	struct	perf_branch_entry	bhrb_entries[BHRB_MAX_ENTRIES];
@@ -131,16 +131,7 @@ static void pmao_restore_workaround(bool ebb) { }
 
 static bool regs_use_siar(struct pt_regs *regs)
 {
-	/*
-	 * When we take a performance monitor exception the regs are setup
-	 * using perf_read_regs() which overloads some fields, in particular
-	 * regs->result to tell us whether to use SIAR.
-	 *
-	 * However if the regs are from another exception, eg. a syscall, then
-	 * they have not been setup using perf_read_regs() and so regs->result
-	 * is something random.
-	 */
-	return ((TRAP(regs) == 0xf00) && regs->result);
+	return !!regs->result;
 }
 
 /*
@@ -369,8 +360,8 @@ static void power_pmu_bhrb_disable(struct perf_event *event)
 	if (!ppmu->bhrb_nr)
 		return;
 
-	WARN_ON_ONCE(!cpuhw->bhrb_users);
 	cpuhw->bhrb_users--;
+	WARN_ON_ONCE(cpuhw->bhrb_users < 0);
 	perf_sched_cb_dec(event->ctx->pmu);
 
 	if (!cpuhw->disabled && !cpuhw->bhrb_users) {
@@ -651,7 +642,7 @@ static void pmao_restore_workaround(bool ebb)
 
 	/*
 	 * We are already soft-disabled in power_pmu_enable(). We need to hard
-	 * disable to actually prevent the PMU exception from firing.
+	 * enable to actually prevent the PMU exception from firing.
 	 */
 	hard_irq_disable();
 
@@ -1441,7 +1432,7 @@ static int power_pmu_add(struct perf_event *event, int ef_flags)
 	 * skip the schedulability test here, it will be performed
 	 * at commit time(->commit_txn) as a whole
 	 */
-	if (cpuhw->txn_flags & PERF_PMU_TXN_ADD)
+	if (cpuhw->group_flag & PERF_EVENT_TXN)
 		goto nocheck;
 
 	if (check_excludes(cpuhw->event, cpuhw->flags, n0, 1))
@@ -1586,22 +1577,13 @@ static void power_pmu_stop(struct perf_event *event, int ef_flags)
  * Start group events scheduling transaction
  * Set the flag to make pmu::enable() not perform the
  * schedulability test, it will be performed at commit time
- *
- * We only support PERF_PMU_TXN_ADD transactions. Save the
- * transaction flags but otherwise ignore non-PERF_PMU_TXN_ADD
- * transactions.
  */
-static void power_pmu_start_txn(struct pmu *pmu, unsigned int txn_flags)
+static void power_pmu_start_txn(struct pmu *pmu)
 {
 	struct cpu_hw_events *cpuhw = this_cpu_ptr(&cpu_hw_events);
 
-	WARN_ON_ONCE(cpuhw->txn_flags);		/* txn already in flight */
-
-	cpuhw->txn_flags = txn_flags;
-	if (txn_flags & ~PERF_PMU_TXN_ADD)
-		return;
-
 	perf_pmu_disable(pmu);
+	cpuhw->group_flag |= PERF_EVENT_TXN;
 	cpuhw->n_txn_start = cpuhw->n_events;
 }
 
@@ -1613,15 +1595,8 @@ static void power_pmu_start_txn(struct pmu *pmu, unsigned int txn_flags)
 static void power_pmu_cancel_txn(struct pmu *pmu)
 {
 	struct cpu_hw_events *cpuhw = this_cpu_ptr(&cpu_hw_events);
-	unsigned int txn_flags;
 
-	WARN_ON_ONCE(!cpuhw->txn_flags);	/* no txn in flight */
-
-	txn_flags = cpuhw->txn_flags;
-	cpuhw->txn_flags = 0;
-	if (txn_flags & ~PERF_PMU_TXN_ADD)
-		return;
-
+	cpuhw->group_flag &= ~PERF_EVENT_TXN;
 	perf_pmu_enable(pmu);
 }
 
@@ -1637,15 +1612,7 @@ static int power_pmu_commit_txn(struct pmu *pmu)
 
 	if (!ppmu)
 		return -EAGAIN;
-
 	cpuhw = this_cpu_ptr(&cpu_hw_events);
-	WARN_ON_ONCE(!cpuhw->txn_flags);	/* no txn in flight */
-
-	if (cpuhw->txn_flags & ~PERF_PMU_TXN_ADD) {
-		cpuhw->txn_flags = 0;
-		return 0;
-	}
-
 	n = cpuhw->n_events;
 	if (check_excludes(cpuhw->event, cpuhw->flags, 0, n))
 		return -EAGAIN;
@@ -1656,7 +1623,7 @@ static int power_pmu_commit_txn(struct pmu *pmu)
 	for (i = cpuhw->n_txn_start; i < n; ++i)
 		cpuhw->event[i]->hw.config = cpuhw->events[i];
 
-	cpuhw->txn_flags = 0;
+	cpuhw->group_flag &= ~PERF_EVENT_TXN;
 	perf_pmu_enable(pmu);
 	return 0;
 }

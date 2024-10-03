@@ -29,7 +29,7 @@
 		bootargs = "root=/dev/ram0 rw ramdisk=8192 initrd=0x41000000,8M console=ttySAC2,115200 init=/linuxrc";
 	};
 
-	vdd: fixed-regulator-vdd {
+	vdd: fixed-regulator@0 {
 		compatible = "regulator-fixed";
 		regulator-name = "vdd-supply";
 		regulator-min-microvolt = <1800000>;
@@ -37,7 +37,7 @@
 		regulator-always-on;
 	};
 
-	dbvdd: fixed-regulator-dbvdd {
+	dbvdd: fixed-regulator@1 {
 		compatible = "regulator-fixed";
 		regulator-name = "dbvdd-supply";
 		regulator-min-microvolt = <3300000>;
@@ -45,7 +45,7 @@
 		regulator-always-on;
 	};
 
-	spkvdd: fixed-regulator-spkvdd {
+	spkvdd: fixed-regulator@2 {
 		compatible = "regulator-fixed";
 		regulator-name = "spkvdd-supply";
 		regulator-min-microvolt = <5000000>;
@@ -74,12 +74,10 @@
 	};
 };
 
-&cpu0 {
-	cpu0-supply = <&buck2_reg>;
-};
-
 &dp {
 	samsung,color-space = <0>;
+	samsung,dynamic-range = <0>;
+	samsung,ycbcr-coeff = <0>;
 	samsung,color-depth = <1>;
 	samsung,link-rate = <0x0a>;
 	samsung,lane-count = <4>;
@@ -87,11 +85,19 @@
 	pinctrl-names = "default";
 	pinctrl-0 = <&dp_hpd>;
 	status = "okay";
+};
+
+&ehci {
+	samsung,vbus-gpio = <&gpx2 6 GPIO_ACTIVE_HIGH>;
+};
+
+&fimd {
+	status = "okay";
 
 	display-timings {
 		native-mode = <&timing0>;
 
-		timing0: timing {
+		timing0: timing@0 {
 			/* 1280x800 */
 			clock-frequency = <50000>;
 			hactive = <1280>;
@@ -104,14 +110,6 @@
 			vsync-len = <4>;
 		};
 	};
-};
-
-&ehci {
-	samsung,vbus-gpio = <&gpx2 6 GPIO_ACTIVE_HIGH>;
-};
-
-&fimd {
-	status = "okay";
 };
 
 &hdmi {
@@ -133,9 +131,6 @@
 		reg = <0x09>;
 		interrupt-parent = <&gpx3>;
 		interrupts = <2 IRQ_TYPE_NONE>;
-		pinctrl-names = "default";
-		pinctrl-0 = <&max77686_irq>;
-		wakeup-source;
 
 		voltage-regulators {
 			ldo1_reg: LDO1 {
@@ -195,7 +190,6 @@
 				regulator-name = "P1.8V_LDO_OUT10";
 				regulator-min-microvolt = <1800000>;
 				regulator-max-microvolt = <1800000>;
-				regulator-always-on;
 			};
 
 			ldo11_reg: LDO11 {
@@ -414,14 +408,5 @@
 			label = "Kernel";
 			reg = <0x40000 0xc0000>;
 		};
-	};
-};
-
-&pinctrl_0 {
-	max77686_irq: max77686-irq {
-		samsung,pins = "gpx3-2";
-		samsung,pin-function = <0xf>;
-		samsung,pin-pud = <0>;
-		samsung,pin-drv = <0>;
 	};
 };

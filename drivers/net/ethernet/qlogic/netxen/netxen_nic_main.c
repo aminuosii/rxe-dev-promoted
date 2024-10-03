@@ -852,8 +852,7 @@ netxen_check_options(struct netxen_adapter *adapter)
 	ptr32 = (__le32 *)&serial_num;
 	offset = NX_FW_SERIAL_NUM_OFFSET;
 	for (i = 0; i < 8; i++) {
-		err = netxen_rom_fast_read(adapter, offset, &val);
-		if (err) {
+		if (netxen_rom_fast_read(adapter, offset, &val) == -1) {
 			dev_err(&pdev->dev, "error reading board info\n");
 			adapter->driver_mismatch = 1;
 			return;
@@ -2286,7 +2285,7 @@ static void netxen_tx_timeout_task(struct work_struct *work)
 			goto request_reset;
 		}
 	}
-	netif_trans_update(adapter->netdev);
+	adapter->netdev->trans_start = jiffies;
 	rtnl_unlock();
 	return;
 
@@ -2892,7 +2891,7 @@ netxen_sysfs_read_crb(struct file *filp, struct kobject *kobj,
 		struct bin_attribute *attr,
 		char *buf, loff_t offset, size_t size)
 {
-	struct device *dev = kobj_to_dev(kobj);
+	struct device *dev = container_of(kobj, struct device, kobj);
 	struct netxen_adapter *adapter = dev_get_drvdata(dev);
 	u32 data;
 	u64 qmdata;
@@ -2920,7 +2919,7 @@ netxen_sysfs_write_crb(struct file *filp, struct kobject *kobj,
 		struct bin_attribute *attr,
 		char *buf, loff_t offset, size_t size)
 {
-	struct device *dev = kobj_to_dev(kobj);
+	struct device *dev = container_of(kobj, struct device, kobj);
 	struct netxen_adapter *adapter = dev_get_drvdata(dev);
 	u32 data;
 	u64 qmdata;
@@ -2961,7 +2960,7 @@ netxen_sysfs_read_mem(struct file *filp, struct kobject *kobj,
 		struct bin_attribute *attr,
 		char *buf, loff_t offset, size_t size)
 {
-	struct device *dev = kobj_to_dev(kobj);
+	struct device *dev = container_of(kobj, struct device, kobj);
 	struct netxen_adapter *adapter = dev_get_drvdata(dev);
 	u64 data;
 	int ret;
@@ -2982,7 +2981,7 @@ static ssize_t netxen_sysfs_write_mem(struct file *filp, struct kobject *kobj,
 		struct bin_attribute *attr, char *buf,
 		loff_t offset, size_t size)
 {
-	struct device *dev = kobj_to_dev(kobj);
+	struct device *dev = container_of(kobj, struct device, kobj);
 	struct netxen_adapter *adapter = dev_get_drvdata(dev);
 	u64 data;
 	int ret;
@@ -3019,16 +3018,16 @@ netxen_sysfs_read_dimm(struct file *filp, struct kobject *kobj,
 		struct bin_attribute *attr,
 		char *buf, loff_t offset, size_t size)
 {
-	struct device *dev = kobj_to_dev(kobj);
+	struct device *dev = container_of(kobj, struct device, kobj);
 	struct netxen_adapter *adapter = dev_get_drvdata(dev);
 	struct net_device *netdev = adapter->netdev;
 	struct netxen_dimm_cfg dimm;
 	u8 dw, rows, cols, banks, ranks;
 	u32 val;
 
-	if (size < attr->size) {
+	if (size != sizeof(struct netxen_dimm_cfg)) {
 		netdev_err(netdev, "Invalid size\n");
-		return -EINVAL;
+		return -1;
 	}
 
 	memset(&dimm, 0, sizeof(struct netxen_dimm_cfg));
@@ -3138,7 +3137,7 @@ out:
 
 static struct bin_attribute bin_attr_dimm = {
 	.attr = { .name = "dimm", .mode = (S_IRUGO | S_IWUSR) },
-	.size = sizeof(struct netxen_dimm_cfg),
+	.size = 0,
 	.read = netxen_sysfs_read_dimm,
 };
 

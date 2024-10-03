@@ -15,6 +15,7 @@
 #include <linux/dmaengine.h>
 #include <linux/mfd/tmio.h>
 #include <linux/mmc/host.h>
+#include <linux/mmc/tmio.h>
 #include <linux/pagemap.h>
 #include <linux/scatterlist.h>
 
@@ -62,7 +63,7 @@ static void tmio_mmc_start_dma_rx(struct tmio_mmc_host *host)
 		}
 	}
 
-	if ((!aligned && (host->sg_len > 1 || sg->length > PAGE_SIZE ||
+	if ((!aligned && (host->sg_len > 1 || sg->length > PAGE_CACHE_SIZE ||
 			  (align & PAGE_MASK))) || !multiple) {
 		ret = -EINVAL;
 		goto pio;
@@ -94,6 +95,9 @@ static void tmio_mmc_start_dma_rx(struct tmio_mmc_host *host)
 			ret = cookie;
 		}
 	}
+	dev_dbg(&host->pdev->dev, "%s(): mapped %d -> %d, cookie %d, rq %p\n",
+		__func__, host->sg_len, ret, cookie, host->mrq);
+
 pio:
 	if (!desc) {
 		/* DMA failed, fall back to PIO */
@@ -111,6 +115,9 @@ pio:
 		dev_warn(&host->pdev->dev,
 			 "DMA failed: %d, falling back to PIO\n", ret);
 	}
+
+	dev_dbg(&host->pdev->dev, "%s(): desc %p, cookie %d, sg[%d]\n", __func__,
+		desc, cookie, host->sg_len);
 }
 
 static void tmio_mmc_start_dma_tx(struct tmio_mmc_host *host)
@@ -132,7 +139,7 @@ static void tmio_mmc_start_dma_tx(struct tmio_mmc_host *host)
 		}
 	}
 
-	if ((!aligned && (host->sg_len > 1 || sg->length > PAGE_SIZE ||
+	if ((!aligned && (host->sg_len > 1 || sg->length > PAGE_CACHE_SIZE ||
 			  (align & PAGE_MASK))) || !multiple) {
 		ret = -EINVAL;
 		goto pio;
@@ -168,6 +175,9 @@ static void tmio_mmc_start_dma_tx(struct tmio_mmc_host *host)
 			ret = cookie;
 		}
 	}
+	dev_dbg(&host->pdev->dev, "%s(): mapped %d -> %d, cookie %d, rq %p\n",
+		__func__, host->sg_len, ret, cookie, host->mrq);
+
 pio:
 	if (!desc) {
 		/* DMA failed, fall back to PIO */
@@ -185,6 +195,9 @@ pio:
 		dev_warn(&host->pdev->dev,
 			 "DMA failed: %d, falling back to PIO\n", ret);
 	}
+
+	dev_dbg(&host->pdev->dev, "%s(): desc %p, cookie %d\n", __func__,
+		desc, cookie);
 }
 
 void tmio_mmc_start_dma(struct tmio_mmc_host *host,
@@ -248,7 +261,7 @@ void tmio_mmc_request_dma(struct tmio_mmc_host *host, struct tmio_mmc_data *pdat
 {
 	/* We can only either use DMA for both Tx and Rx or not use it at all */
 	if (!host->dma || (!host->pdev->dev.of_node &&
-		(!pdata->chan_priv_tx || !pdata->chan_priv_rx)))
+		(!host->dma->chan_priv_tx || !host->dma->chan_priv_rx)))
 		return;
 
 	if (!host->chan_tx && !host->chan_rx) {
@@ -265,7 +278,7 @@ void tmio_mmc_request_dma(struct tmio_mmc_host *host, struct tmio_mmc_data *pdat
 		dma_cap_set(DMA_SLAVE, mask);
 
 		host->chan_tx = dma_request_slave_channel_compat(mask,
-					host->dma->filter, pdata->chan_priv_tx,
+					host->dma->filter, host->dma->chan_priv_tx,
 					&host->pdev->dev, "tx");
 		dev_dbg(&host->pdev->dev, "%s: TX: got channel %p\n", __func__,
 			host->chan_tx);
@@ -273,6 +286,8 @@ void tmio_mmc_request_dma(struct tmio_mmc_host *host, struct tmio_mmc_data *pdat
 		if (!host->chan_tx)
 			return;
 
+		if (host->dma->chan_priv_tx)
+			cfg.slave_id = host->dma->slave_id_tx;
 		cfg.direction = DMA_MEM_TO_DEV;
 		cfg.dst_addr = res->start + (CTL_SD_DATA_PORT << host->bus_shift);
 		cfg.dst_addr_width = host->dma->dma_buswidth;
@@ -284,7 +299,7 @@ void tmio_mmc_request_dma(struct tmio_mmc_host *host, struct tmio_mmc_data *pdat
 			goto ecfgtx;
 
 		host->chan_rx = dma_request_slave_channel_compat(mask,
-					host->dma->filter, pdata->chan_priv_rx,
+					host->dma->filter, host->dma->chan_priv_rx,
 					&host->pdev->dev, "rx");
 		dev_dbg(&host->pdev->dev, "%s: RX: got channel %p\n", __func__,
 			host->chan_rx);
@@ -292,6 +307,8 @@ void tmio_mmc_request_dma(struct tmio_mmc_host *host, struct tmio_mmc_data *pdat
 		if (!host->chan_rx)
 			goto ereqrx;
 
+		if (host->dma->chan_priv_rx)
+			cfg.slave_id = host->dma->slave_id_rx;
 		cfg.direction = DMA_DEV_TO_MEM;
 		cfg.src_addr = cfg.dst_addr + host->pdata->dma_rx_offset;
 		cfg.src_addr_width = host->dma->dma_buswidth;

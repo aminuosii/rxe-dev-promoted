@@ -39,7 +39,6 @@
 #include <linux/compiler.h>
 
 #include <linux/atomic.h>
-#include <linux/netdevice.h>
 
 #include <rdma/ib_verbs.h>
 #include <rdma/ib_mad.h>
@@ -93,8 +92,6 @@ enum ib_sa_selector {
 	 */
 	IB_SA_BEST = 3
 };
-
-#define IB_SA_CAP_MASK2_SENDONLY_FULL_MEM_SUPPORT	BIT(12)
 
 /*
  * Structures for SA records are named "struct ib_sa_xxx_rec."  No
@@ -158,17 +155,10 @@ struct ib_sa_path_rec {
 	u8           packet_life_time;
 	u8           preference;
 	u8           dmac[ETH_ALEN];
-	/* ignored in IB */
 	int	     ifindex;
-	/* ignored in IB */
 	struct net  *net;
 	enum ib_gid_type gid_type;
 };
-
-static inline struct net_device *ib_get_ndev_from_path(struct ib_sa_path_rec *rec)
-{
-	return rec->net ? dev_get_by_index(rec->net, rec->ifindex) : NULL;
-}
 
 #define IB_SA_MCMEMBER_REC_MGID				IB_SA_COMP_MASK( 0)
 #define IB_SA_MCMEMBER_REC_PORT_GID			IB_SA_COMP_MASK( 1)
@@ -208,6 +198,9 @@ struct ib_sa_mcmember_rec {
 	u8           scope;
 	u8           join_state;
 	int          proxy_join;
+	int	     ifindex;
+	struct net  *net;
+	enum ib_gid_type gid_type;
 };
 
 /* Service Record Component Mask Sec 15.2.5.14 Ver 1.1	*/
@@ -405,8 +398,6 @@ int ib_sa_get_mcmember_rec(struct ib_device *device, u8 port_num,
  */
 int ib_init_ah_from_mcmember(struct ib_device *device, u8 port_num,
 			     struct ib_sa_mcmember_rec *rec,
-			     struct net_device *ndev,
-			     enum ib_gid_type gid_type,
 			     struct ib_ah_attr *ah_attr);
 
 /**
@@ -440,15 +431,5 @@ int ib_sa_guid_info_rec_query(struct ib_sa_client *client,
 					       void *context),
 			      void *context,
 			      struct ib_sa_query **sa_query);
-
-/* Support get SA ClassPortInfo */
-int ib_sa_classport_info_rec_query(struct ib_sa_client *client,
-				   struct ib_device *device, u8 port_num,
-				   int timeout_ms, gfp_t gfp_mask,
-				   void (*callback)(int status,
-						    struct ib_class_port_info *resp,
-						    void *context),
-				   void *context,
-				   struct ib_sa_query **sa_query);
 
 #endif /* IB_SA_H */

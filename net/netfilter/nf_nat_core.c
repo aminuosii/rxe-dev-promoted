@@ -38,9 +38,6 @@ static const struct nf_nat_l3proto __rcu *nf_nat_l3protos[NFPROTO_NUMPROTO]
 static const struct nf_nat_l4proto __rcu **nf_nat_l4protos[NFPROTO_NUMPROTO]
 						__read_mostly;
 
-static struct hlist_head *nf_nat_bysource __read_mostly;
-static unsigned int nf_nat_htable_size __read_mostly;
-static unsigned int nf_nat_hash_rnd __read_mostly;
 
 inline const struct nf_nat_l3proto *
 __nf_nat_l3proto_find(u8 family)
@@ -86,7 +83,7 @@ out:
 	rcu_read_unlock();
 }
 
-int nf_xfrm_me_harder(struct net *net, struct sk_buff *skb, unsigned int family)
+int nf_xfrm_me_harder(struct sk_buff *skb, unsigned int family)
 {
 	struct flowi fl;
 	unsigned int hh_len;
@@ -102,7 +99,7 @@ int nf_xfrm_me_harder(struct net *net, struct sk_buff *skb, unsigned int family)
 		dst = ((struct xfrm_dst *)dst)->route;
 	dst_hold(dst);
 
-	dst = xfrm_lookup(net, dst, &fl, skb->sk, 0);
+	dst = xfrm_lookup(dev_net(dst->dev), dst, &fl, skb->sk, 0);
 	if (IS_ERR(dst))
 		return PTR_ERR(dst);
 
@@ -121,17 +118,16 @@ EXPORT_SYMBOL(nf_xfrm_me_harder);
 
 /* We keep an extra hash for each conntrack, for fast searching. */
 static inline unsigned int
-hash_by_src(const struct net *n, const struct nf_conntrack_tuple *tuple)
+hash_by_src(const struct net *net, u16 zone,
+	    const struct nf_conntrack_tuple *tuple)
 {
 	unsigned int hash;
 
-	get_random_once(&nf_nat_hash_rnd, sizeof(nf_nat_hash_rnd));
-
 	/* Original src, to ensure we map it consistently if poss. */
 	hash = jhash2((u32 *)&tuple->src, sizeof(tuple->src) / sizeof(u32),
-		      tuple->dst.protonum ^ nf_nat_hash_rnd ^ net_hash_mix(n));
+		      tuple->dst.protonum ^ zone ^ nf_conntrack_hash_rnd);
 
-	return reciprocal_scale(hash, nf_nat_htable_size);
+	return reciprocal_scale(hash, net->ct.nat_htable_size);
 }
 
 /* Is this tuple already taken? (not by us) */
@@ -189,23 +185,20 @@ same_src(const struct nf_conn *ct,
 
 /* Only called for SRC manip */
 static int
-find_appropriate_src(struct net *net,
-		     const struct nf_conntrack_zone *zone,
+find_appropriate_src(struct net *net, u16 zone,
 		     const struct nf_nat_l3proto *l3proto,
 		     const struct nf_nat_l4proto *l4proto,
 		     const struct nf_conntrack_tuple *tuple,
 		     struct nf_conntrack_tuple *result,
 		     const struct nf_nat_range *range)
 {
-	unsigned int h = hash_by_src(net, tuple);
+	unsigned int h = hash_by_src(net, zone, tuple);
 	const struct nf_conn_nat *nat;
 	const struct nf_conn *ct;
 
-	hlist_for_each_entry_rcu(nat, &nf_nat_bysource[h], bysource) {
+	hlist_for_each_entry_rcu(nat, &net->ct.nat_bysource[h], bysource) {
 		ct = nat->ct;
-		if (same_src(ct, tuple) &&
-		    net_eq(net, nf_ct_net(ct)) &&
-		    nf_ct_zone_equal(ct, zone, IP_CT_DIR_ORIGINAL)) {
+		if (same_src(ct, tuple) && nf_ct_zone(ct) == zone) {
 			/* Copy source part from reply tuple. */
 			nf_ct_invert_tuplepr(result,
 				       &ct->tuplehash[IP_CT_DIR_REPLY].tuple);
@@ -225,8 +218,7 @@ find_appropriate_src(struct net *net,
  * the ip with the lowest src-ip/dst-ip/proto usage.
  */
 static void
-find_best_ips_proto(const struct nf_conntrack_zone *zone,
-		    struct nf_conntrack_tuple *tuple,
+find_best_ips_proto(u16 zone, struct nf_conntrack_tuple *tuple,
 		    const struct nf_nat_range *range,
 		    const struct nf_conn *ct,
 		    enum nf_nat_manip_type maniptype)
@@ -266,7 +258,7 @@ find_best_ips_proto(const struct nf_conntrack_zone *zone,
 	 */
 	j = jhash2((u32 *)&tuple->src.u3, sizeof(tuple->src.u3) / sizeof(u32),
 		   range->flags & NF_NAT_RANGE_PERSISTENT ?
-			0 : (__force u32)tuple->dst.u3.all[max] ^ zone->id);
+			0 : (__force u32)tuple->dst.u3.all[max] ^ zone);
 
 	full_range = false;
 	for (i = 0; i <= max; i++) {
@@ -305,12 +297,10 @@ get_unique_tuple(struct nf_conntrack_tuple *tuple,
 		 struct nf_conn *ct,
 		 enum nf_nat_manip_type maniptype)
 {
-	const struct nf_conntrack_zone *zone;
 	const struct nf_nat_l3proto *l3proto;
 	const struct nf_nat_l4proto *l4proto;
 	struct net *net = nf_ct_net(ct);
-
-	zone = nf_ct_zone(ct);
+	u16 zone = nf_ct_zone(ct);
 
 	rcu_read_lock();
 	l3proto = __nf_nat_l3proto_find(orig_tuple->src.l3num);
@@ -430,14 +420,14 @@ nf_nat_setup_info(struct nf_conn *ct,
 	if (maniptype == NF_NAT_MANIP_SRC) {
 		unsigned int srchash;
 
-		srchash = hash_by_src(net,
+		srchash = hash_by_src(net, nf_ct_zone(ct),
 				      &ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple);
 		spin_lock_bh(&nf_nat_lock);
 		/* nf_conntrack_alter_reply might re-allocate extension aera */
 		nat = nfct_nat(ct);
 		nat->ct = ct;
 		hlist_add_head_rcu(&nat->bysource,
-				   &nf_nat_bysource[srchash]);
+				   &net->ct.nat_bysource[srchash]);
 		spin_unlock_bh(&nf_nat_lock);
 	}
 
@@ -825,14 +815,27 @@ nfnetlink_parse_nat_setup(struct nf_conn *ct,
 }
 #endif
 
+static int __net_init nf_nat_net_init(struct net *net)
+{
+	/* Leave them the same for the moment. */
+	net->ct.nat_htable_size = net->ct.htable_size;
+	net->ct.nat_bysource = nf_ct_alloc_hashtable(&net->ct.nat_htable_size, 0);
+	if (!net->ct.nat_bysource)
+		return -ENOMEM;
+	return 0;
+}
+
 static void __net_exit nf_nat_net_exit(struct net *net)
 {
 	struct nf_nat_proto_clean clean = {};
 
 	nf_ct_iterate_cleanup(net, nf_nat_proto_clean, &clean, 0, 0);
+	synchronize_rcu();
+	nf_ct_free_hashtable(net->ct.nat_bysource, net->ct.nat_htable_size);
 }
 
 static struct pernet_operations nf_nat_net_ops = {
+	.init = nf_nat_net_init,
 	.exit = nf_nat_net_exit,
 };
 
@@ -845,16 +848,8 @@ static int __init nf_nat_init(void)
 {
 	int ret;
 
-	/* Leave them the same for the moment. */
-	nf_nat_htable_size = nf_conntrack_htable_size;
-
-	nf_nat_bysource = nf_ct_alloc_hashtable(&nf_nat_htable_size, 0);
-	if (!nf_nat_bysource)
-		return -ENOMEM;
-
 	ret = nf_ct_extend_register(&nat_extend);
 	if (ret < 0) {
-		nf_ct_free_hashtable(nf_nat_bysource, nf_nat_htable_size);
 		printk(KERN_ERR "nf_nat_core: Unable to register extension\n");
 		return ret;
 	}
@@ -878,7 +873,6 @@ static int __init nf_nat_init(void)
 	return 0;
 
  cleanup_extend:
-	nf_ct_free_hashtable(nf_nat_bysource, nf_nat_htable_size);
 	nf_ct_extend_unregister(&nat_extend);
 	return ret;
 }
@@ -897,7 +891,6 @@ static void __exit nf_nat_cleanup(void)
 	for (i = 0; i < NFPROTO_NUMPROTO; i++)
 		kfree(nf_nat_l4protos[i]);
 	synchronize_net();
-	nf_ct_free_hashtable(nf_nat_bysource, nf_nat_htable_size);
 }
 
 MODULE_LICENSE("GPL");

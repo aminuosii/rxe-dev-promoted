@@ -1,6 +1,6 @@
 /*
- * Copyright (c) 2016 Mellanox Technologies Ltd. All rights reserved.
- * Copyright (c) 2015 System Fabric Works, Inc. All rights reserved.
+ * Copyright (c) 2009-2011 Mellanox Technologies Ltd. All rights reserved.
+ * Copyright (c) 2009-2011 System Fabric Works, Inc. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -30,6 +30,8 @@
  * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  */
+
+/* cq implementation details */
 
 #include "rxe.h"
 #include "rxe_loc.h"
@@ -70,7 +72,19 @@ static void rxe_send_complete(unsigned long data)
 {
 	struct rxe_cq *cq = (struct rxe_cq *)data;
 
-	cq->ibcq.comp_handler(&cq->ibcq, cq->ibcq.cq_context);
+	while (1) {
+		u8 notify = cq->notify;
+
+		cq->ibcq.comp_handler(&cq->ibcq, cq->ibcq.cq_context);
+
+		/* See if anything was added to the CQ during the
+		 * comp_handler call.  If so, go around again because we
+		 * won't be rescheduled.
+		 * XXX: is there a race on enqueue right after this test
+		 * but before we're out? */
+		if (notify == cq->notify)
+			return;
+	}
 }
 
 int rxe_cq_from_init(struct rxe_dev *rxe, struct rxe_cq *cq, int cqe,
@@ -86,7 +100,7 @@ int rxe_cq_from_init(struct rxe_dev *rxe, struct rxe_cq *cq, int cqe,
 		return -ENOMEM;
 	}
 
-	err = do_mmap_info(rxe, udata, false, context, cq->queue->buf,
+	err = do_mmap_info(rxe, udata, 0, context, cq->queue->buf,
 			   cq->queue->buf_size, &cq->queue->ip);
 	if (err) {
 		kvfree(cq->queue->buf);
@@ -139,17 +153,16 @@ int rxe_cq_post(struct rxe_cq *cq, struct rxe_cqe *cqe, int solicited)
 
 	memcpy(producer_addr(cq->queue), cqe, sizeof(*cqe));
 
-	/* make sure all changes to the CQ are written before we update the
-	 * producer pointer
-	 */
-	smp_wmb();
+	/* make sure all changes to the CQ are written before
+	   we update the producer pointer */
+	wmb();
 
 	advance_producer(cq->queue);
 	spin_unlock_irqrestore(&cq->cq_lock, flags);
 
 	if ((cq->notify == IB_CQ_NEXT_COMP) ||
 	    (cq->notify == IB_CQ_SOLICITED && solicited)) {
-		cq->notify = 0;
+		cq->notify++;
 		tasklet_schedule(&cq->comp_task);
 	}
 

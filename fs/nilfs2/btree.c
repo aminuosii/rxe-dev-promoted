@@ -13,7 +13,11 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  *
- * Written by Koji Sato.
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ *
+ * Written by Koji Sato <koji@osrg.net>.
  */
 
 #include <linux/slab.h>
@@ -384,7 +388,7 @@ static int nilfs_btree_root_broken(const struct nilfs_btree_node *node,
 	nchildren = nilfs_btree_node_get_nchildren(node);
 
 	if (unlikely(level < NILFS_BTREE_LEVEL_NODE_MIN ||
-		     level >= NILFS_BTREE_LEVEL_MAX ||
+		     level > NILFS_BTREE_LEVEL_MAX ||
 		     nchildren < 0 ||
 		     nchildren > NILFS_BTREE_ROOT_NCHILDREN_MAX)) {
 		pr_crit("NILFS: bad btree root (inode number=%lu): level = %d, flags = 0x%x, nchildren = %d\n",
@@ -685,8 +689,7 @@ static int nilfs_btree_lookup(const struct nilfs_bmap *btree,
 }
 
 static int nilfs_btree_lookup_contig(const struct nilfs_bmap *btree,
-				     __u64 key, __u64 *ptrp,
-				     unsigned int maxblocks)
+				     __u64 key, __u64 *ptrp, unsigned maxblocks)
 {
 	struct nilfs_btree_path *path;
 	struct nilfs_btree_node *node;
@@ -916,6 +919,8 @@ static void nilfs_btree_split(struct nilfs_bmap *btree,
 			      int level, __u64 *keyp, __u64 *ptrp)
 {
 	struct nilfs_btree_node *node, *right;
+	__u64 newkey;
+	__u64 newptr;
 	int nchildren, n, move, ncblk;
 
 	node = nilfs_btree_get_nonroot_node(path, level);
@@ -936,6 +941,9 @@ static void nilfs_btree_split(struct nilfs_bmap *btree,
 		mark_buffer_dirty(path[level].bp_bh);
 	if (!buffer_dirty(path[level].bp_sib_bh))
 		mark_buffer_dirty(path[level].bp_sib_bh);
+
+	newkey = nilfs_btree_node_get_key(right, 0);
+	newptr = path[level].bp_newreq.bpr_ptr;
 
 	if (move) {
 		path[level].bp_index -= nilfs_btree_node_get_nchildren(node);
@@ -1029,12 +1037,12 @@ static __u64 nilfs_btree_find_target_v(const struct nilfs_bmap *btree,
 	if (ptr != NILFS_BMAP_INVALID_PTR)
 		/* sequential access */
 		return ptr;
-
-	ptr = nilfs_btree_find_near(btree, path);
-	if (ptr != NILFS_BMAP_INVALID_PTR)
-		/* near */
-		return ptr;
-
+	else {
+		ptr = nilfs_btree_find_near(btree, path);
+		if (ptr != NILFS_BMAP_INVALID_PTR)
+			/* near */
+			return ptr;
+	}
 	/* block group */
 	return nilfs_bmap_find_target_in_group(btree);
 }
@@ -1848,7 +1856,7 @@ int nilfs_btree_convert_and_insert(struct nilfs_bmap *btree,
 				   __u64 key, __u64 ptr,
 				   const __u64 *keys, const __u64 *ptrs, int n)
 {
-	struct buffer_head *bh = NULL;
+	struct buffer_head *bh;
 	union nilfs_bmap_ptr_req dreq, nreq, *di, *ni;
 	struct nilfs_bmap_stats stats;
 	int ret;

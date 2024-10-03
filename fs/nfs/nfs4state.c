@@ -42,6 +42,7 @@
 #include <linux/slab.h>
 #include <linux/fs.h>
 #include <linux/nfs_fs.h>
+#include <linux/nfs_idmap.h>
 #include <linux/kthread.h>
 #include <linux/module.h>
 #include <linux/random.h>
@@ -56,7 +57,6 @@
 #include "callback.h"
 #include "delegation.h"
 #include "internal.h"
-#include "nfs4idmap.h"
 #include "nfs4session.h"
 #include "pnfs.h"
 #include "netns.h"
@@ -65,10 +65,7 @@
 
 #define OPENOWNER_POOL_SIZE	8
 
-const nfs4_stateid zero_stateid = {
-	{ .data = { 0 } },
-	.type = NFS4_SPECIAL_STATEID_TYPE,
-};
+const nfs4_stateid zero_stateid;
 static DEFINE_MUTEX(nfs_clid_init_mutex);
 
 int nfs4_init_clientid(struct nfs_client *clp, struct rpc_cred *cred)
@@ -312,6 +309,7 @@ int nfs41_init_clientid(struct nfs_client *clp, struct rpc_cred *cred)
 
 	if (test_bit(NFS4CLNT_LEASE_CONFIRM, &clp->cl_state))
 		goto do_confirm;
+	nfs4_begin_drain_session(clp);
 	status = nfs4_proc_exchange_id(clp, cred);
 	if (status != 0)
 		goto out;
@@ -988,20 +986,15 @@ static void nfs4_copy_open_stateid(nfs4_stateid *dst, struct nfs4_state *state)
  * Byte-range lock aware utility to initialize the stateid of read/write
  * requests.
  */
-int nfs4_select_rw_stateid(struct nfs4_state *state,
-		fmode_t fmode, const struct nfs_lockowner *lockowner,
-		nfs4_stateid *dst, struct rpc_cred **cred)
+int nfs4_select_rw_stateid(nfs4_stateid *dst, struct nfs4_state *state,
+		fmode_t fmode, const struct nfs_lockowner *lockowner)
 {
-	int ret;
-
-	if (cred != NULL)
-		*cred = NULL;
-	ret = nfs4_copy_lock_stateid(dst, state, lockowner);
+	int ret = nfs4_copy_lock_stateid(dst, state, lockowner);
 	if (ret == -EIO)
 		/* A lost lock - don't even consider delegations */
 		goto out;
 	/* returns true if delegation stateid found and copied */
-	if (nfs4_copy_delegation_stateid(state->inode, fmode, dst, cred)) {
+	if (nfs4_copy_delegation_stateid(dst, state->inode, fmode)) {
 		ret = 0;
 		goto out;
 	}
@@ -1489,8 +1482,6 @@ restart:
 					spin_unlock(&state->state_lock);
 				}
 				nfs4_put_open_state(state);
-				clear_bit(NFS_STATE_RECLAIM_NOGRACE,
-					&state->flags);
 				spin_lock(&sp->so_lock);
 				goto restart;
 			}
@@ -1733,8 +1724,7 @@ restart:
 			if (!test_and_clear_bit(ops->owner_flag_bit,
 							&sp->so_flags))
 				continue;
-			if (!atomic_inc_not_zero(&sp->so_count))
-				continue;
+			atomic_inc(&sp->so_count);
 			spin_unlock(&clp->cl_lock);
 			rcu_read_unlock();
 
@@ -1840,7 +1830,6 @@ static int nfs4_establish_lease(struct nfs_client *clp)
 		clp->cl_mvops->reboot_recovery_ops;
 	int status;
 
-	nfs4_begin_drain_session(clp);
 	cred = nfs4_get_clid_cred(clp);
 	if (cred == NULL)
 		return -ENOENT;
@@ -1913,7 +1902,7 @@ static int nfs4_try_migration(struct nfs_server *server, struct rpc_cred *cred)
 		goto out;
 	}
 
-	inode = d_inode(server->super->s_root);
+	inode = server->super->s_root->d_inode;
 	result = nfs4_proc_get_locations(inode, locations, page, cred);
 	if (result) {
 		dprintk("<-- %s: failed to retrieve fs_locations: %d\n",
@@ -2032,7 +2021,7 @@ restart:
 
 		rcu_read_unlock();
 
-		inode = d_inode(server->super->s_root);
+		inode = server->super->s_root->d_inode;
 		status = nfs4_proc_fsid_present(inode, cred);
 		if (status != -NFS4ERR_MOVED)
 			goto restart;	/* wasn't this one */
@@ -2161,11 +2150,21 @@ void nfs4_schedule_session_recovery(struct nfs4_session *session, int err)
 }
 EXPORT_SYMBOL_GPL(nfs4_schedule_session_recovery);
 
-void nfs41_notify_server(struct nfs_client *clp)
+static void nfs41_ping_server(struct nfs_client *clp)
 {
 	/* Use CHECK_LEASE to ping the server with a SEQUENCE */
 	set_bit(NFS4CLNT_CHECK_LEASE, &clp->cl_state);
 	nfs4_schedule_state_manager(clp);
+}
+
+void nfs41_server_notify_target_slotid_update(struct nfs_client *clp)
+{
+	nfs41_ping_server(clp);
+}
+
+void nfs41_server_notify_highest_slotid_update(struct nfs_client *clp)
+{
+	nfs41_ping_server(clp);
 }
 
 static void nfs4_reset_all_state(struct nfs_client *clp)
@@ -2190,35 +2189,25 @@ static void nfs41_handle_server_reboot(struct nfs_client *clp)
 	}
 }
 
-static void nfs41_handle_all_state_revoked(struct nfs_client *clp)
+static void nfs41_handle_state_revoked(struct nfs_client *clp)
 {
 	nfs4_reset_all_state(clp);
 	dprintk("%s: state revoked on server %s\n", __func__, clp->cl_hostname);
 }
 
-static void nfs41_handle_some_state_revoked(struct nfs_client *clp)
-{
-	nfs4_state_mark_reclaim_helper(clp, nfs4_state_mark_reclaim_nograce);
-	nfs4_schedule_state_manager(clp);
-
-	dprintk("%s: state revoked on server %s\n", __func__, clp->cl_hostname);
-}
-
 static void nfs41_handle_recallable_state_revoked(struct nfs_client *clp)
 {
-	/* FIXME: For now, we destroy all layouts. */
-	pnfs_destroy_all_layouts(clp);
-	/* FIXME: For now, we test all delegations+open state+locks. */
-	nfs41_handle_some_state_revoked(clp);
+	/* This will need to handle layouts too */
+	nfs_expire_all_delegations(clp);
 	dprintk("%s: Recallable state revoked on server %s!\n", __func__,
 			clp->cl_hostname);
 }
 
 static void nfs41_handle_backchannel_fault(struct nfs_client *clp)
 {
-	set_bit(NFS4CLNT_SESSION_RESET, &clp->cl_state);
-	nfs4_schedule_state_manager(clp);
-
+	nfs_expire_all_delegations(clp);
+	if (test_and_set_bit(NFS4CLNT_SESSION_RESET, &clp->cl_state) == 0)
+		nfs4_schedule_state_manager(clp);
 	dprintk("%s: server %s declared a backchannel fault\n", __func__,
 			clp->cl_hostname);
 }
@@ -2240,11 +2229,10 @@ void nfs41_handle_sequence_flag_errors(struct nfs_client *clp, u32 flags)
 
 	if (flags & SEQ4_STATUS_RESTART_RECLAIM_NEEDED)
 		nfs41_handle_server_reboot(clp);
-	if (flags & (SEQ4_STATUS_EXPIRED_ALL_STATE_REVOKED))
-		nfs41_handle_all_state_revoked(clp);
-	if (flags & (SEQ4_STATUS_EXPIRED_SOME_STATE_REVOKED |
+	if (flags & (SEQ4_STATUS_EXPIRED_ALL_STATE_REVOKED |
+			    SEQ4_STATUS_EXPIRED_SOME_STATE_REVOKED |
 			    SEQ4_STATUS_ADMIN_STATE_REVOKED))
-		nfs41_handle_some_state_revoked(clp);
+		nfs41_handle_state_revoked(clp);
 	if (flags & SEQ4_STATUS_LEASE_MOVED)
 		nfs4_schedule_lease_moved_recovery(clp);
 	if (flags & SEQ4_STATUS_RECALLABLE_STATE_REVOKED)

@@ -278,7 +278,7 @@ static int find_group_orlov(struct super_block *sb, struct inode *parent)
 	avefreeb = free_blocks / ngroups;
 	ndirs = percpu_counter_read_positive(&sbi->s_dirs_counter);
 
-	if ((parent == d_inode(sb->s_root)) ||
+	if ((parent == sb->s_root->d_inode) ||
 	    (EXT2_I(parent)->i_flags & EXT2_TOPDIR_FL)) {
 		struct ext2_group_desc *best_desc = NULL;
 		int best_ndir = inodes_per_group;
@@ -577,10 +577,7 @@ got:
 		goto fail;
 	}
 
-	err = dquot_initialize(inode);
-	if (err)
-		goto fail_drop;
-
+	dquot_initialize(inode);
 	err = dquot_alloc_inode(inode);
 	if (err)
 		goto fail_drop;

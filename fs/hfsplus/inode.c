@@ -87,9 +87,9 @@ static int hfsplus_releasepage(struct page *page, gfp_t mask)
 	}
 	if (!tree)
 		return 0;
-	if (tree->node_size >= PAGE_SIZE) {
+	if (tree->node_size >= PAGE_CACHE_SIZE) {
 		nidx = page->index >>
-			(tree->node_size_shift - PAGE_SHIFT);
+			(tree->node_size_shift - PAGE_CACHE_SHIFT);
 		spin_lock(&tree->hash_lock);
 		node = hfs_bnode_findhash(tree, nidx);
 		if (!node)
@@ -103,8 +103,8 @@ static int hfsplus_releasepage(struct page *page, gfp_t mask)
 		spin_unlock(&tree->hash_lock);
 	} else {
 		nidx = page->index <<
-			(PAGE_SHIFT - tree->node_size_shift);
-		i = 1 << (PAGE_SHIFT - tree->node_size_shift);
+			(PAGE_CACHE_SHIFT - tree->node_size_shift);
+		i = 1 << (PAGE_CACHE_SHIFT - tree->node_size_shift);
 		spin_lock(&tree->hash_lock);
 		do {
 			node = hfs_bnode_findhash(tree, nidx++);
@@ -122,7 +122,8 @@ static int hfsplus_releasepage(struct page *page, gfp_t mask)
 	return res ? try_to_free_buffers(page) : 0;
 }
 
-static ssize_t hfsplus_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
+static ssize_t hfsplus_direct_IO(struct kiocb *iocb, struct iov_iter *iter,
+				 loff_t offset)
 {
 	struct file *file = iocb->ki_filp;
 	struct address_space *mapping = file->f_mapping;
@@ -130,7 +131,7 @@ static ssize_t hfsplus_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 	size_t count = iov_iter_count(iter);
 	ssize_t ret;
 
-	ret = blockdev_direct_IO(iocb, inode, iter, hfsplus_get_block);
+	ret = blockdev_direct_IO(iocb, inode, iter, offset, hfsplus_get_block);
 
 	/*
 	 * In case of error extending write may have instantiated a few
@@ -138,7 +139,7 @@ static ssize_t hfsplus_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 	 */
 	if (unlikely(iov_iter_rw(iter) == WRITE && ret < 0)) {
 		loff_t isize = i_size_read(inode);
-		loff_t end = iocb->ki_pos + count;
+		loff_t end = offset + count;
 
 		if (end > isize)
 			hfsplus_write_failed(mapping, end);
@@ -228,21 +229,21 @@ static int hfsplus_file_release(struct inode *inode, struct file *file)
 	if (HFSPLUS_IS_RSRC(inode))
 		inode = HFSPLUS_I(inode)->rsrc_inode;
 	if (atomic_dec_and_test(&HFSPLUS_I(inode)->opencnt)) {
-		inode_lock(inode);
+		mutex_lock(&inode->i_mutex);
 		hfsplus_file_truncate(inode);
 		if (inode->i_flags & S_DEAD) {
 			hfsplus_delete_cat(inode->i_ino,
 					   HFSPLUS_SB(sb)->hidden_dir, NULL);
 			hfsplus_delete_inode(inode);
 		}
-		inode_unlock(inode);
+		mutex_unlock(&inode->i_mutex);
 	}
 	return 0;
 }
 
 static int hfsplus_setattr(struct dentry *dentry, struct iattr *attr)
 {
-	struct inode *inode = d_inode(dentry);
+	struct inode *inode = dentry->d_inode;
 	int error;
 
 	error = inode_change_ok(inode, attr);
@@ -285,7 +286,7 @@ int hfsplus_file_fsync(struct file *file, loff_t start, loff_t end,
 	error = filemap_write_and_wait_range(inode->i_mapping, start, end);
 	if (error)
 		return error;
-	inode_lock(inode);
+	mutex_lock(&inode->i_mutex);
 
 	/*
 	 * Sync inode metadata into the catalog and extent trees.
@@ -326,7 +327,7 @@ int hfsplus_file_fsync(struct file *file, loff_t start, loff_t end,
 	if (!test_bit(HFSPLUS_SB_NOBARRIER, &sbi->flags))
 		blkdev_issue_flush(inode->i_sb->s_bdev, GFP_KERNEL, NULL);
 
-	inode_unlock(inode);
+	mutex_unlock(&inode->i_mutex);
 
 	return error;
 }
@@ -373,7 +374,6 @@ struct inode *hfsplus_new_inode(struct super_block *sb, umode_t mode)
 
 	hip = HFSPLUS_I(inode);
 	INIT_LIST_HEAD(&hip->open_dir_list);
-	spin_lock_init(&hip->open_dir_lock);
 	mutex_init(&hip->extents_lock);
 	atomic_set(&hip->opencnt, 0);
 	hip->extent_state = 0;
@@ -403,7 +403,6 @@ struct inode *hfsplus_new_inode(struct super_block *sb, umode_t mode)
 	} else if (S_ISLNK(inode->i_mode)) {
 		sbi->file_count++;
 		inode->i_op = &page_symlink_inode_operations;
-		inode_nohighmem(inode);
 		inode->i_mapping->a_ops = &hfsplus_aops;
 		hip->clump_blocks = 1;
 	} else
@@ -527,7 +526,6 @@ int hfsplus_cat_read_inode(struct inode *inode, struct hfs_find_data *fd)
 			inode->i_mapping->a_ops = &hfsplus_aops;
 		} else if (S_ISLNK(inode->i_mode)) {
 			inode->i_op = &page_symlink_inode_operations;
-			inode_nohighmem(inode);
 			inode->i_mapping->a_ops = &hfsplus_aops;
 		} else {
 			init_special_inode(inode, inode->i_mode,

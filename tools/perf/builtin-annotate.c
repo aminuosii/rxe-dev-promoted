@@ -21,7 +21,7 @@
 #include "util/evsel.h"
 #include "util/annotate.h"
 #include "util/event.h"
-#include <subcmd/parse-options.h>
+#include "util/parse-options.h"
 #include "util/parse-events.h"
 #include "util/thread.h"
 #include "util/sort.h"
@@ -47,7 +47,7 @@ struct perf_annotate {
 };
 
 static int perf_evsel__add_sample(struct perf_evsel *evsel,
-				  struct perf_sample *sample,
+				  struct perf_sample *sample __maybe_unused,
 				  struct addr_location *al,
 				  struct perf_annotate *ann)
 {
@@ -59,23 +59,15 @@ static int perf_evsel__add_sample(struct perf_evsel *evsel,
 	    (al->sym == NULL ||
 	     strcmp(ann->sym_hist_filter, al->sym->name) != 0)) {
 		/* We're only interested in a symbol named sym_hist_filter */
-		/*
-		 * FIXME: why isn't this done in the symbol_filter when loading
-		 * the DSO?
-		 */
 		if (al->sym != NULL) {
 			rb_erase(&al->sym->rb_node,
 				 &al->map->dso->symbols[al->map->type]);
 			symbol__delete(al->sym);
-			dso__reset_find_symbol_cache(al->map->dso);
 		}
 		return 0;
 	}
 
-	sample->period = 1;
-	sample->weight = 1;
-
-	he = __hists__add_entry(hists, al, NULL, NULL, NULL, sample, true);
+	he = __hists__add_entry(hists, al, NULL, NULL, NULL, 1, 1, 0, true);
 	if (he == NULL)
 		return -ENOMEM;
 
@@ -92,25 +84,23 @@ static int process_sample_event(struct perf_tool *tool,
 {
 	struct perf_annotate *ann = container_of(tool, struct perf_annotate, tool);
 	struct addr_location al;
-	int ret = 0;
 
-	if (machine__resolve(machine, &al, sample) < 0) {
+	if (perf_event__preprocess_sample(event, machine, &al, sample) < 0) {
 		pr_warning("problem processing %d event, skipping it.\n",
 			   event->header.type);
 		return -1;
 	}
 
 	if (ann->cpu_list && !test_bit(sample->cpu, ann->cpu_bitmap))
-		goto out_put;
+		return 0;
 
 	if (!al.filtered && perf_evsel__add_sample(evsel, sample, &al, ann)) {
 		pr_warning("problem incrementing symbol count, "
 			   "skipping event\n");
-		ret = -1;
+		return -1;
 	}
-out_put:
-	addr_location__put(&al);
-	return ret;
+
+	return 0;
 }
 
 static int hist_entry__tty_annotate(struct hist_entry *he,
@@ -191,7 +181,6 @@ find_next:
 			 * symbol, free he->ms.sym->src to signal we already
 			 * processed this symbol.
 			 */
-			zfree(&notes->src->cycles_hist);
 			zfree(&notes->src);
 		}
 	}
@@ -214,7 +203,7 @@ static int __cmd_annotate(struct perf_annotate *ann)
 	}
 
 	if (!objdump_path) {
-		ret = perf_env__lookup_objdump(&session->header.env);
+		ret = perf_session_env__lookup_objdump(&session->header.env);
 		if (ret)
 			goto out;
 	}
@@ -243,9 +232,7 @@ static int __cmd_annotate(struct perf_annotate *ann)
 		if (nr_samples > 0) {
 			total_nr_samples += nr_samples;
 			hists__collapse_resort(hists, NULL);
-			/* Don't sort callchain */
-			perf_evsel__reset_sample_bit(pos, CALLCHAIN);
-			perf_evsel__output_resort(pos, NULL);
+			hists__output_resort(hists, NULL);
 
 			if (symbol_conf.event_group &&
 			    !perf_evsel__is_group_leader(pos))
@@ -296,6 +283,7 @@ int cmd_annotate(int argc, const char **argv, const char *prefix __maybe_unused)
 		},
 	};
 	struct perf_data_file file = {
+		.path  = input_name,
 		.mode  = PERF_DATA_MODE_READ,
 	};
 	const struct option options[] = {
@@ -324,9 +312,8 @@ int cmd_annotate(int argc, const char **argv, const char *prefix __maybe_unused)
 	OPT_BOOLEAN(0, "skip-missing", &annotate.skip_missing,
 		    "Skip symbols that cannot be annotated"),
 	OPT_STRING('C', "cpu", &annotate.cpu_list, "cpu", "list of cpus to profile"),
-	OPT_CALLBACK(0, "symfs", NULL, "directory",
-		     "Look for files with symbols relative to this directory",
-		     symbol__config_symfs),
+	OPT_STRING(0, "symfs", &symbol_conf.symfs, "directory",
+		   "Look for files with symbols relative to this directory"),
 	OPT_BOOLEAN(0, "source", &symbol_conf.annotate_src,
 		    "Interleave source code with assembly code (default)"),
 	OPT_BOOLEAN(0, "asm-raw", &symbol_conf.annotate_asm_raw,
@@ -337,8 +324,6 @@ int cmd_annotate(int argc, const char **argv, const char *prefix __maybe_unused)
 		   "objdump binary to use for disassembly and annotations"),
 	OPT_BOOLEAN(0, "group", &symbol_conf.event_group,
 		    "Show event group information together"),
-	OPT_BOOLEAN(0, "show-total-period", &symbol_conf.show_total_period,
-		    "Show a column with the sum of periods"),
 	OPT_END()
 	};
 	int ret = hists__init();
@@ -347,18 +332,15 @@ int cmd_annotate(int argc, const char **argv, const char *prefix __maybe_unused)
 		return ret;
 
 	argc = parse_options(argc, argv, options, annotate_usage, 0);
-	if (argc) {
-		/*
-		 * Special case: if there's an argument left then assume that
-		 * it's a symbol filter:
-		 */
-		if (argc > 1)
-			usage_with_options(annotate_usage, options);
 
-		annotate.sym_hist_filter = argv[0];
-	}
+	if (annotate.use_stdio)
+		use_browser = 0;
+	else if (annotate.use_tui)
+		use_browser = 1;
+	else if (annotate.use_gtk)
+		use_browser = 2;
 
-	file.path  = input_name;
+	setup_browser(true);
 
 	annotate.session = perf_session__new(&file, false, &annotate.tool);
 	if (annotate.session == NULL)
@@ -371,17 +353,19 @@ int cmd_annotate(int argc, const char **argv, const char *prefix __maybe_unused)
 	if (ret < 0)
 		goto out_delete;
 
-	if (setup_sorting(NULL) < 0)
+	if (setup_sorting() < 0)
 		usage_with_options(annotate_usage, options);
 
-	if (annotate.use_stdio)
-		use_browser = 0;
-	else if (annotate.use_tui)
-		use_browser = 1;
-	else if (annotate.use_gtk)
-		use_browser = 2;
+	if (argc) {
+		/*
+		 * Special case: if there's an argument left then assume that
+		 * it's a symbol filter:
+		 */
+		if (argc > 1)
+			usage_with_options(annotate_usage, options);
 
-	setup_browser(true);
+		annotate.sym_hist_filter = argv[0];
+	}
 
 	ret = __cmd_annotate(&annotate);
 

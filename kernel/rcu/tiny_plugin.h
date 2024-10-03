@@ -23,7 +23,7 @@
  */
 
 #include <linux/kthread.h>
-#include <linux/init.h>
+#include <linux/module.h>
 #include <linux/debugfs.h>
 #include <linux/seq_file.h>
 
@@ -122,7 +122,18 @@ free_out:
 	debugfs_remove_recursive(rcudir);
 	return 1;
 }
-device_initcall(rcutiny_trace_init);
+
+static void __exit rcutiny_trace_cleanup(void)
+{
+	debugfs_remove_recursive(rcudir);
+}
+
+module_init(rcutiny_trace_init);
+module_exit(rcutiny_trace_cleanup);
+
+MODULE_AUTHOR("Paul E. McKenney");
+MODULE_DESCRIPTION("Read-Copy Update tracing for tiny implementation");
+MODULE_LICENSE("GPL");
 
 static void check_cpu_stall(struct rcu_ctrlblk *rcp)
 {
@@ -133,17 +144,16 @@ static void check_cpu_stall(struct rcu_ctrlblk *rcp)
 		return;
 	rcp->ticks_this_gp++;
 	j = jiffies;
-	js = READ_ONCE(rcp->jiffies_stall);
+	js = ACCESS_ONCE(rcp->jiffies_stall);
 	if (rcp->rcucblist && ULONG_CMP_GE(j, js)) {
 		pr_err("INFO: %s stall on CPU (%lu ticks this GP) idle=%llx (t=%lu jiffies q=%ld)\n",
 		       rcp->name, rcp->ticks_this_gp, DYNTICK_TASK_EXIT_IDLE,
 		       jiffies - rcp->gp_start, rcp->qlen);
 		dump_stack();
-		WRITE_ONCE(rcp->jiffies_stall,
-			   jiffies + 3 * rcu_jiffies_till_stall_check() + 3);
+		ACCESS_ONCE(rcp->jiffies_stall) = jiffies +
+			3 * rcu_jiffies_till_stall_check() + 3;
 	} else if (ULONG_CMP_GE(j, js)) {
-		WRITE_ONCE(rcp->jiffies_stall,
-			   jiffies + rcu_jiffies_till_stall_check());
+		ACCESS_ONCE(rcp->jiffies_stall) = jiffies + rcu_jiffies_till_stall_check();
 	}
 }
 
@@ -151,8 +161,7 @@ static void reset_cpu_stall_ticks(struct rcu_ctrlblk *rcp)
 {
 	rcp->ticks_this_gp = 0;
 	rcp->gp_start = jiffies;
-	WRITE_ONCE(rcp->jiffies_stall,
-		   jiffies + rcu_jiffies_till_stall_check());
+	ACCESS_ONCE(rcp->jiffies_stall) = jiffies + rcu_jiffies_till_stall_check();
 }
 
 static void check_cpu_stalls(void)

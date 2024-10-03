@@ -429,10 +429,7 @@ static u32 mvs_get_ncq_tag(struct sas_task *task, u32 *tag)
 
 	if (qc) {
 		if (qc->tf.command == ATA_CMD_FPDMA_WRITE ||
-		    qc->tf.command == ATA_CMD_FPDMA_READ ||
-		    qc->tf.command == ATA_CMD_FPDMA_RECV ||
-		    qc->tf.command == ATA_CMD_FPDMA_SEND ||
-		    qc->tf.command == ATA_CMD_NCQ_NON_DATA) {
+			qc->tf.command == ATA_CMD_FPDMA_READ) {
 			*tag = qc->tag;
 			return 1;
 		}
@@ -444,11 +441,14 @@ static u32 mvs_get_ncq_tag(struct sas_task *task, u32 *tag)
 static int mvs_task_prep_ata(struct mvs_info *mvi,
 			     struct mvs_task_exec_info *tei)
 {
+	struct sas_ha_struct *sha = mvi->sas;
 	struct sas_task *task = tei->task;
 	struct domain_device *dev = task->dev;
 	struct mvs_device *mvi_dev = dev->lldd_dev;
 	struct mvs_cmd_hdr *hdr = tei->hdr;
 	struct asd_sas_port *sas_port = dev->port;
+	struct sas_phy *sphy = dev->phy;
+	struct asd_sas_phy *sas_phy = sha->sas_phy[sphy->number];
 	struct mvs_slot_info *slot;
 	void *buf_prd;
 	u32 tag = tei->tag, hdr_tag;
@@ -468,7 +468,7 @@ static int mvs_task_prep_ata(struct mvs_info *mvi,
 	slot->tx = mvi->tx_prod;
 	del_q = TXQ_MODE_I | tag |
 		(TXQ_CMD_STP << TXQ_CMD_SHIFT) |
-		((sas_port->phy_mask & TXQ_PHY_MASK) << TXQ_PHY_SHIFT) |
+		(MVS_PHY_ID << TXQ_PHY_SHIFT) |
 		(mvi_dev->taskfileset << TXQ_SRS_SHIFT);
 	mvi->tx[mvi->tx_prod] = cpu_to_le32(del_q);
 
@@ -740,8 +740,8 @@ static int mvs_task_prep(struct sas_task *task, struct mvs_info *mvi, int is_tmf
 			mv_dprintk("device %016llx not ready.\n",
 				SAS_ADDR(dev->sas_addr));
 
-		rc = SAS_PHY_DOWN;
-		return rc;
+			rc = SAS_PHY_DOWN;
+			return rc;
 	}
 	tei.port = dev->port->lldd_port;
 	if (tei.port && !tei.port->port_attached && !tmf) {
@@ -890,8 +890,6 @@ static void mvs_slot_free(struct mvs_info *mvi, u32 rx_desc)
 static void mvs_slot_task_free(struct mvs_info *mvi, struct sas_task *task,
 			  struct mvs_slot_info *slot, u32 slot_idx)
 {
-	if (!slot)
-		return;
 	if (!slot->task)
 		return;
 	if (!sas_protocol_ata(task->task_proto))
@@ -2108,16 +2106,3 @@ int mvs_int_rx(struct mvs_info *mvi, bool self_clear)
 	return 0;
 }
 
-int mvs_gpio_write(struct sas_ha_struct *sha, u8 reg_type, u8 reg_index,
-			u8 reg_count, u8 *write_data)
-{
-	struct mvs_prv_info *mvs_prv = sha->lldd_ha;
-	struct mvs_info *mvi = mvs_prv->mvi[0];
-
-	if (MVS_CHIP_DISP->gpio_write) {
-		return MVS_CHIP_DISP->gpio_write(mvs_prv, reg_type,
-			reg_index, reg_count, write_data);
-	}
-
-	return -ENOSYS;
-}

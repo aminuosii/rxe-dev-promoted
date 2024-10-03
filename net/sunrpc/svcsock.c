@@ -85,7 +85,8 @@ static void svc_reclassify_socket(struct socket *sock)
 {
 	struct sock *sk = sock->sk;
 
-	if (WARN_ON_ONCE(!sock_allow_reclassification(sk)))
+	WARN_ON_ONCE(sock_owned_by_user(sk));
+	if (sock_owned_by_user(sk))
 		return;
 
 	switch (sk->sk_family) {
@@ -180,7 +181,7 @@ int svc_send_common(struct socket *sock, struct xdr_buf *xdr,
 	struct page	**ppage = xdr->pages;
 	size_t		base = xdr->page_base;
 	unsigned int	pglen = xdr->page_len;
-	unsigned int	flags = MSG_MORE | MSG_SENDPAGE_NOTLAST;
+	unsigned int	flags = MSG_MORE;
 	int		slen;
 	int		len = 0;
 
@@ -398,31 +399,6 @@ static int svc_sock_secure_port(struct svc_rqst *rqstp)
 	return svc_port_is_privileged(svc_addr(rqstp));
 }
 
-static bool sunrpc_waitqueue_active(wait_queue_head_t *wq)
-{
-	if (!wq)
-		return false;
-	/*
-	 * There should normally be a memory * barrier here--see
-	 * wq_has_sleeper().
-	 *
-	 * It appears that isn't currently necessary, though, basically
-	 * because callers all appear to have sufficient memory barriers
-	 * between the time the relevant change is made and the
-	 * time they call these callbacks.
-	 *
-	 * The nfsd code itself doesn't actually explicitly wait on
-	 * these waitqueues, but it may wait on them for example in
-	 * sendpage() or sendmsg() calls.  (And those may be the only
-	 * places, since it it uses nonblocking reads.)
-	 *
-	 * Maybe we should add the memory barriers anyway, but these are
-	 * hot paths so we'd need to be convinced there's no sigificant
-	 * penalty.
-	 */
-	return waitqueue_active(wq);
-}
-
 /*
  * INET callback when data has been received on the socket.
  */
@@ -438,7 +414,7 @@ static void svc_udp_data_ready(struct sock *sk)
 		set_bit(XPT_DATA, &svsk->sk_xprt.xpt_flags);
 		svc_xprt_enqueue(&svsk->sk_xprt);
 	}
-	if (sunrpc_waitqueue_active(wq))
+	if (wq && waitqueue_active(wq))
 		wake_up_interruptible(wq);
 }
 
@@ -456,7 +432,7 @@ static void svc_write_space(struct sock *sk)
 		svc_xprt_enqueue(&svsk->sk_xprt);
 	}
 
-	if (sunrpc_waitqueue_active(wq)) {
+	if (wq && waitqueue_active(wq)) {
 		dprintk("RPC svc_write_space: someone sleeping on %p\n",
 		       svsk);
 		wake_up_interruptible(wq);
@@ -616,7 +592,7 @@ static int svc_udp_recvfrom(struct svc_rqst *rqstp)
 	svsk->sk_sk->sk_stamp = skb->tstamp;
 	set_bit(XPT_DATA, &svsk->sk_xprt.xpt_flags); /* there may be more data... */
 
-	len  = skb->len;
+	len  = skb->len - sizeof(struct udphdr);
 	rqstp->rq_arg.len = len;
 
 	rqstp->rq_prot = IPPROTO_UDP;
@@ -640,7 +616,8 @@ static int svc_udp_recvfrom(struct svc_rqst *rqstp)
 		skb_free_datagram_locked(svsk->sk_sk, skb);
 	} else {
 		/* we can use it in-place */
-		rqstp->rq_arg.head[0].iov_base = skb->data;
+		rqstp->rq_arg.head[0].iov_base = skb->data +
+			sizeof(struct udphdr);
 		rqstp->rq_arg.head[0].iov_len = len;
 		if (skb_checksum_complete(skb))
 			goto out_free;
@@ -810,7 +787,7 @@ static void svc_tcp_listen_data_ready(struct sock *sk)
 	}
 
 	wq = sk_sleep(sk);
-	if (sunrpc_waitqueue_active(wq))
+	if (wq && waitqueue_active(wq))
 		wake_up_interruptible_all(wq);
 }
 
@@ -831,7 +808,7 @@ static void svc_tcp_state_change(struct sock *sk)
 		set_bit(XPT_CLOSE, &svsk->sk_xprt.xpt_flags);
 		svc_xprt_enqueue(&svsk->sk_xprt);
 	}
-	if (sunrpc_waitqueue_active(wq))
+	if (wq && waitqueue_active(wq))
 		wake_up_interruptible_all(wq);
 }
 
@@ -846,7 +823,7 @@ static void svc_tcp_data_ready(struct sock *sk)
 		set_bit(XPT_DATA, &svsk->sk_xprt.xpt_flags);
 		svc_xprt_enqueue(&svsk->sk_xprt);
 	}
-	if (sunrpc_waitqueue_active(wq))
+	if (wq && waitqueue_active(wq))
 		wake_up_interruptible(wq);
 }
 
@@ -1390,6 +1367,7 @@ EXPORT_SYMBOL_GPL(svc_sock_update_bufs);
 
 /*
  * Initialize socket for RPC use and create svc_sock struct
+ * XXX: May want to setsockopt SO_SNDBUF and SO_RCVBUF.
  */
 static struct svc_sock *svc_setup_socket(struct svc_serv *serv,
 						struct socket *sock,
@@ -1616,7 +1594,7 @@ static void svc_sock_detach(struct svc_xprt *xprt)
 	sk->sk_write_space = svsk->sk_owspace;
 
 	wq = sk_sleep(sk);
-	if (sunrpc_waitqueue_active(wq))
+	if (wq && waitqueue_active(wq))
 		wake_up_interruptible(wq);
 }
 

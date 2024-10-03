@@ -18,7 +18,7 @@ struct call_single_data {
 	struct llist_node llist;
 	smp_call_func_t func;
 	void *info;
-	unsigned int flags;
+	u16 flags;
 };
 
 /* total number of cpus in this system (may exceed NR_CPUS) */

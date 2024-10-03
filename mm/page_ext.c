@@ -6,7 +6,6 @@
 #include <linux/vmalloc.h>
 #include <linux/kmemleak.h>
 #include <linux/page_owner.h>
-#include <linux/page_idle.h>
 
 /*
  * struct page extension
@@ -60,9 +59,6 @@ static struct page_ext_operations *page_ext_ops[] = {
 #ifdef CONFIG_PAGE_OWNER
 	&page_owner_ops,
 #endif
-#if defined(CONFIG_IDLE_PAGE_TRACKING) && !defined(CONFIG_64BIT)
-	&page_idle_ops,
-#endif
 };
 
 static unsigned long total_usage;
@@ -106,15 +102,12 @@ struct page_ext *lookup_page_ext(struct page *page)
 	struct page_ext *base;
 
 	base = NODE_DATA(page_to_nid(page))->node_page_ext;
-#if defined(CONFIG_DEBUG_VM) || defined(CONFIG_PAGE_POISONING)
+#ifdef CONFIG_DEBUG_VM
 	/*
 	 * The sanity checks the page allocator does upon freeing a
 	 * page can reach here before the page_ext arrays are
 	 * allocated when feeding a range of pages to the allocator
 	 * for the first time during bootup or memory hotplug.
-	 *
-	 * This check is also necessary for ensuring page poisoning
-	 * works as expected when enabled
 	 */
 	if (unlikely(!base))
 		return NULL;
@@ -183,15 +176,12 @@ struct page_ext *lookup_page_ext(struct page *page)
 {
 	unsigned long pfn = page_to_pfn(page);
 	struct mem_section *section = __pfn_to_section(pfn);
-#if defined(CONFIG_DEBUG_VM) || defined(CONFIG_PAGE_POISONING)
+#ifdef CONFIG_DEBUG_VM
 	/*
 	 * The sanity checks the page allocator does upon freeing a
 	 * page can reach here before the page_ext arrays are
 	 * allocated when feeding a range of pages to the allocator
 	 * for the first time during bootup or memory hotplug.
-	 *
-	 * This check is also necessary for ensuring page poisoning
-	 * works as expected when enabled
 	 */
 	if (!section->page_ext)
 		return NULL;
@@ -390,10 +380,8 @@ void __init page_ext_init(void)
 			 * We know some arch can have a nodes layout such as
 			 * -------------pfn-------------->
 			 * N0 | N1 | N2 | N0 | N1 | N2|....
-			 *
-			 * Take into account DEFERRED_STRUCT_PAGE_INIT.
 			 */
-			if (early_pfn_to_nid(pfn) != nid)
+			if (pfn_to_nid(pfn) != nid)
 				continue;
 			if (init_section_page_ext(pfn, nid))
 				goto oom;

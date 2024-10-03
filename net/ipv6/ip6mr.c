@@ -118,7 +118,7 @@ static void mr6_netlink_event(struct mr6_table *mrt, struct mfc6_cache *mfc,
 			      int cmd);
 static int ip6mr_rtm_dumproute(struct sk_buff *skb,
 			       struct netlink_callback *cb);
-static void mroute_clean_tables(struct mr6_table *mrt, bool all);
+static void mroute_clean_tables(struct mr6_table *mrt);
 static void ipmr_expire_process(unsigned long arg);
 
 #ifdef CONFIG_IPV6_MROUTE_MULTIPLE_TABLES
@@ -217,6 +217,7 @@ static const struct fib_rules_ops __net_initconst ip6mr_rules_ops_template = {
 	.match		= ip6mr_rule_match,
 	.configure	= ip6mr_rule_configure,
 	.compare	= ip6mr_rule_compare,
+	.default_pref	= fib_default_rule_pref,
 	.fill		= ip6mr_rule_fill,
 	.nlgroup	= RTNLGRP_IPV6_RULE,
 	.policy		= ip6mr_rule_policy,
@@ -334,7 +335,7 @@ static struct mr6_table *ip6mr_new_table(struct net *net, u32 id)
 static void ip6mr_free_table(struct mr6_table *mrt)
 {
 	del_timer_sync(&mrt->ipmr_expire_timer);
-	mroute_clean_tables(mrt, true);
+	mroute_clean_tables(mrt);
 	kfree(mrt);
 }
 
@@ -549,7 +550,7 @@ static void ipmr_mfc_seq_stop(struct seq_file *seq, void *v)
 
 	if (it->cache == &mrt->mfc6_unres_queue)
 		spin_unlock_bh(&mfc_unres_lock);
-	else if (it->cache == &mrt->mfc6_cache_array[it->ct])
+	else if (it->cache == mrt->mfc6_cache_array)
 		read_unlock(&mrt_lock);
 }
 
@@ -765,6 +766,10 @@ static struct net_device *ip6mr_reg_vif(struct net *net, struct mr6_table *mrt)
 	return dev;
 
 failure:
+	/* allow the register to be completed before unregistering. */
+	rtnl_unlock();
+	rtnl_lock();
+
 	unregister_netdevice(dev);
 	return NULL;
 }
@@ -1538,7 +1543,7 @@ static int ip6mr_mfc_add(struct net *net, struct mr6_table *mrt,
  *	Close the multicast socket, and clear the vif tables etc
  */
 
-static void mroute_clean_tables(struct mr6_table *mrt, bool all)
+static void mroute_clean_tables(struct mr6_table *mrt)
 {
 	int i;
 	LIST_HEAD(list);
@@ -1548,9 +1553,8 @@ static void mroute_clean_tables(struct mr6_table *mrt, bool all)
 	 *	Shut down all active vif entries
 	 */
 	for (i = 0; i < mrt->maxvif; i++) {
-		if (!all && (mrt->vif6_table[i].flags & VIFF_STATIC))
-			continue;
-		mif6_delete(mrt, i, &list);
+		if (!(mrt->vif6_table[i].flags & VIFF_STATIC))
+			mif6_delete(mrt, i, &list);
 	}
 	unregister_netdevice_many(&list);
 
@@ -1559,7 +1563,7 @@ static void mroute_clean_tables(struct mr6_table *mrt, bool all)
 	 */
 	for (i = 0; i < MFC6_LINES; i++) {
 		list_for_each_entry_safe(c, next, &mrt->mfc6_cache_array[i], list) {
-			if (!all && (c->mfc_flags & MFC_STATIC))
+			if (c->mfc_flags & MFC_STATIC)
 				continue;
 			write_lock_bh(&mrt_lock);
 			list_del(&c->list);
@@ -1622,7 +1626,7 @@ int ip6mr_sk_done(struct sock *sk)
 						     net->ipv6.devconf_all);
 			write_unlock_bh(&mrt_lock);
 
-			mroute_clean_tables(mrt, false);
+			mroute_clean_tables(mrt);
 			err = 0;
 			break;
 		}
@@ -1982,13 +1986,13 @@ int ip6mr_compat_ioctl(struct sock *sk, unsigned int cmd, void __user *arg)
 }
 #endif
 
-static inline int ip6mr_forward2_finish(struct net *net, struct sock *sk, struct sk_buff *skb)
+static inline int ip6mr_forward2_finish(struct sock *sk, struct sk_buff *skb)
 {
-	__IP6_INC_STATS(net, ip6_dst_idev(skb_dst(skb)),
-			IPSTATS_MIB_OUTFORWDATAGRAMS);
-	__IP6_ADD_STATS(net, ip6_dst_idev(skb_dst(skb)),
-			IPSTATS_MIB_OUTOCTETS, skb->len);
-	return dst_output(net, sk, skb);
+	IP6_INC_STATS_BH(dev_net(skb_dst(skb)->dev), ip6_dst_idev(skb_dst(skb)),
+			 IPSTATS_MIB_OUTFORWDATAGRAMS);
+	IP6_ADD_STATS_BH(dev_net(skb_dst(skb)->dev), ip6_dst_idev(skb_dst(skb)),
+			 IPSTATS_MIB_OUTOCTETS, skb->len);
+	return dst_output_sk(sk, skb);
 }
 
 /*
@@ -2060,8 +2064,8 @@ static int ip6mr_forward2(struct net *net, struct mr6_table *mrt,
 
 	IP6CB(skb)->flags |= IP6SKB_FORWARDED;
 
-	return NF_HOOK(NFPROTO_IPV6, NF_INET_FORWARD,
-		       net, NULL, skb, skb->dev, dev,
+	return NF_HOOK(NFPROTO_IPV6, NF_INET_FORWARD, NULL, skb,
+		       skb->dev, dev,
 		       ip6mr_forward2_finish);
 
 out_free:
@@ -2268,7 +2272,7 @@ static int __ip6mr_fill_mroute(struct mr6_table *mrt, struct sk_buff *skb,
 	mfcs.mfcs_packets = c->mfc_un.res.pkt;
 	mfcs.mfcs_bytes = c->mfc_un.res.bytes;
 	mfcs.mfcs_wrong_if = c->mfc_un.res.wrong_if;
-	if (nla_put_64bit(skb, RTA_MFC_STATS, sizeof(mfcs), &mfcs, RTA_PAD) < 0)
+	if (nla_put(skb, RTA_MFC_STATS, sizeof(mfcs), &mfcs) < 0)
 		return -EMSGSIZE;
 
 	rtm->rtm_type = RTN_MULTICAST;
@@ -2411,7 +2415,7 @@ static int mr6_msgsize(bool unresolved, int maxvif)
 		      + nla_total_size(0)	/* RTA_MULTIPATH */
 		      + maxvif * NLA_ALIGN(sizeof(struct rtnexthop))
 						/* RTA_MFC_STATS */
-		      + nla_total_size_64bit(sizeof(struct rta_mfc_stats))
+		      + nla_total_size(sizeof(struct rta_mfc_stats))
 		;
 
 	return len;

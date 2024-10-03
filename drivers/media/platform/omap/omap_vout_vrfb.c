@@ -21,7 +21,6 @@
 
 #include "omap_voutdef.h"
 #include "omap_voutlib.h"
-#include "omap_vout_vrfb.h"
 
 #define OMAP_DMA_NO_DEVICE	0
 
@@ -79,12 +78,10 @@ void omap_vout_free_vrfb_buffers(struct omap_vout_device *vout)
 	int j;
 
 	for (j = 0; j < VRFB_NUM_BUFS; j++) {
-		if (vout->smsshado_virt_addr[j]) {
-			omap_vout_free_buffer(vout->smsshado_virt_addr[j],
-					      vout->smsshado_size);
-			vout->smsshado_virt_addr[j] = 0;
-			vout->smsshado_phy_addr[j] = 0;
-		}
+		omap_vout_free_buffer(vout->smsshado_virt_addr[j],
+				vout->smsshado_size);
+		vout->smsshado_virt_addr[j] = 0;
+		vout->smsshado_phy_addr[j] = 0;
 	}
 }
 

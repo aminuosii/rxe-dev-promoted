@@ -1,6 +1,6 @@
 /*
- * Copyright (c) 2016 Mellanox Technologies Ltd. All rights reserved.
- * Copyright (c) 2015 System Fabric Works, Inc. All rights reserved.
+ * Copyright (c) 2009-2011 Mellanox Technologies Ltd. All rights reserved.
+ * Copyright (c) 2009-2011 System Fabric Works, Inc. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -34,8 +34,9 @@
 #ifndef RXE_LOC_H
 #define RXE_LOC_H
 
-/* rxe_av.c */
+/* local declarations shared between rxe files */
 
+/* rxe_v.c */
 int rxe_av_chk_attr(struct rxe_dev *rxe, struct ib_ah_attr *attr);
 
 int rxe_av_from_attr(struct rxe_dev *rxe, u8 port_num,
@@ -44,13 +45,8 @@ int rxe_av_from_attr(struct rxe_dev *rxe, u8 port_num,
 int rxe_av_to_attr(struct rxe_dev *rxe, struct rxe_av *av,
 		   struct ib_ah_attr *attr);
 
-int rxe_av_fill_ip_info(struct rxe_dev *rxe,
-			struct rxe_av *av,
-			struct ib_ah_attr *attr,
-			struct ib_gid_attr *sgid_attr,
-			union ib_gid *sgid);
-
-struct rxe_av *rxe_get_av(struct rxe_pkt_info *pkt);
+int rxe_av_fill_ip_info(struct rxe_dev *rxe, struct rxe_av *av,
+		    struct ib_ah_attr *attr, union ib_gid *sgid);
 
 /* rxe_cq.c */
 int rxe_cq_chk_attr(struct rxe_dev *rxe, struct rxe_cq *cq,
@@ -67,20 +63,28 @@ int rxe_cq_post(struct rxe_cq *cq, struct rxe_cqe *cqe, int solicited);
 void rxe_cq_cleanup(void *arg);
 
 /* rxe_mcast.c */
-int rxe_mcast_get_grp(struct rxe_dev *rxe, union ib_gid *mgid,
+int rxe_mcast_get_grp(struct rxe_dev *rxe, union ib_gid *mgid, u16 mlid,
 		      struct rxe_mc_grp **grp_p);
 
 int rxe_mcast_add_grp_elem(struct rxe_dev *rxe, struct rxe_qp *qp,
 			   struct rxe_mc_grp *grp);
 
 int rxe_mcast_drop_grp_elem(struct rxe_dev *rxe, struct rxe_qp *qp,
-			    union ib_gid *mgid);
+			    union ib_gid *mgid, u16 mlid);
 
 void rxe_drop_all_mcast_groups(struct rxe_qp *qp);
 
 void rxe_mc_cleanup(void *arg);
 
 /* rxe_mmap.c */
+
+/* must match struct in librxe */
+struct mminfo {
+	__u64			offset;
+	__u32			size;
+	__u32			pad;
+};
+
 struct rxe_mmap_info {
 	struct list_head	pending_mmaps;
 	struct ib_ucontext	*context;
@@ -101,12 +105,18 @@ int rxe_mmap(struct ib_ucontext *context, struct vm_area_struct *vma);
 
 /* rxe_mr.c */
 enum copy_direction {
-	to_mem_obj,
-	from_mem_obj,
+	direction_in,
+	direction_out,
 };
+
+#define DMA_BAD_ADDER ((u64) 0)
 
 int rxe_mem_init_dma(struct rxe_dev *rxe, struct rxe_pd *pd,
 		     int access, struct rxe_mem *mem);
+
+int rxe_mem_init_phys(struct rxe_dev *rxe, struct rxe_pd *pd,
+		      int access, u64 iova, struct ib_phys_buf *buf,
+		      int num_buf, struct rxe_mem *mem);
 
 int rxe_mem_init_user(struct rxe_dev *rxe, struct rxe_pd *pd, u64 start,
 		      u64 length, u64 iova, int access, struct ib_udata *udata,
@@ -114,6 +124,12 @@ int rxe_mem_init_user(struct rxe_dev *rxe, struct rxe_pd *pd, u64 start,
 
 int rxe_mem_init_fast(struct rxe_dev *rxe, struct rxe_pd *pd,
 		      int max_pages, struct rxe_mem *mem);
+
+int rxe_mem_init_mw(struct rxe_dev *rxe, struct rxe_pd *pd,
+		    struct rxe_mem *mw);
+
+int rxe_mem_init_fmr(struct rxe_dev *rxe, struct rxe_pd *pd, int access,
+		     struct ib_fmr_attr *attr, struct rxe_mem *fmr);
 
 int rxe_mem_copy(struct rxe_mem *mem, u64 iova, void *addr,
 		 int length, enum copy_direction dir, u32 *crcp);
@@ -187,11 +203,8 @@ static inline int qp_mtu(struct rxe_qp *qp)
 		return RXE_PORT_MAX_MTU;
 }
 
-static inline int rcv_wqe_size(int max_sge)
-{
-	return sizeof(struct rxe_recv_wqe) +
-		max_sge * sizeof(struct ib_sge);
-}
+#define RCV_WQE_SIZE(max_sge) (sizeof(struct rxe_recv_wqe) + \
+			       (max_sge)*sizeof(struct ib_sge))
 
 void free_rd_atomic_resource(struct rxe_qp *qp, struct resp_res *res);
 
@@ -221,6 +234,8 @@ int rxe_srq_from_attr(struct rxe_dev *rxe, struct rxe_srq *srq,
 		      struct ib_srq_attr *attr, enum ib_srq_attr_mask mask,
 		      struct ib_udata *udata);
 
+void rxe_srq_cleanup(void *arg);
+
 extern struct ib_dma_mapping_ops rxe_dma_mapping_ops;
 
 void rxe_release(struct kref *kref);
@@ -248,18 +263,20 @@ static inline int rxe_xmit_packet(struct rxe_dev *rxe, struct rxe_qp *qp,
 	int err;
 	int is_request = pkt->mask & RXE_REQ_MASK;
 
+	/* drop pkt if qp is in wrong state to send */
+	if (!qp->valid)
+		goto drop;
+
 	if ((is_request && (qp->req.state != QP_STATE_READY)) ||
 	    (!is_request && (qp->resp.state != QP_STATE_READY))) {
 		pr_info("Packet dropped. QP is not in ready state\n");
 		goto drop;
 	}
 
-	if (pkt->mask & RXE_LOOPBACK_MASK) {
-		memcpy(SKB_TO_PKT(skb), pkt, sizeof(*pkt));
+	if (pkt->mask & RXE_LOOPBACK_MASK)
 		err = rxe->ifc_ops->loopback(skb);
-	} else {
+	else
 		err = rxe->ifc_ops->send(rxe, pkt, skb);
-	}
 
 	if (err) {
 		rxe->xmit_errors++;

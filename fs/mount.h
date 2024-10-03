@@ -88,7 +88,6 @@ static inline int is_mounted(struct vfsmount *mnt)
 extern struct mount *__lookup_mnt(struct vfsmount *, struct dentry *);
 extern struct mount *__lookup_mnt_last(struct vfsmount *, struct dentry *);
 
-extern int __legitimize_mnt(struct vfsmount *, unsigned);
 extern bool legitimize_mnt(struct vfsmount *, unsigned);
 
 extern void __detach_mounts(struct dentry *dentry);
@@ -118,6 +117,7 @@ static inline void unlock_mount_hash(void)
 }
 
 struct proc_mounts {
+	struct seq_file m;
 	struct mnt_namespace *ns;
 	struct path root;
 	int (*show)(struct seq_file *, struct vfsmount *);
@@ -125,6 +125,8 @@ struct proc_mounts {
 	u64 cached_event;
 	loff_t cached_index;
 };
+
+#define proc_mounts(p) (container_of((p), struct proc_mounts, m))
 
 extern const struct seq_operations mounts_op;
 

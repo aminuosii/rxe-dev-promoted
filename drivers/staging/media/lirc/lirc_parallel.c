@@ -33,7 +33,7 @@
 #include <linux/fs.h>
 #include <linux/kernel.h>
 #include <linux/ioport.h>
-#include <linux/ktime.h>
+#include <linux/time.h>
 #include <linux/mm.h>
 #include <linux/delay.h>
 
@@ -144,22 +144,25 @@ static void lirc_off(void)
 
 static unsigned int init_lirc_timer(void)
 {
-	ktime_t kt, now, timeout;
+	struct timeval tv, now;
 	unsigned int level, newlevel, timeelapsed, newtimer;
 	int count = 0;
 
-	kt = ktime_get();
-	/* wait max. 1 sec. */
-	timeout = ktime_add_ns(kt, NSEC_PER_SEC);
+	do_gettimeofday(&tv);
+	tv.tv_sec++;                     /* wait max. 1 sec. */
 	level = lirc_get_timer();
 	do {
 		newlevel = lirc_get_timer();
 		if (level == 0 && newlevel != 0)
 			count++;
 		level = newlevel;
-		now = ktime_get();
-	} while (count < 1000 && (ktime_before(now, timeout)));
-	timeelapsed = ktime_us_delta(now, kt);
+		do_gettimeofday(&now);
+	} while (count < 1000 && (now.tv_sec < tv.tv_sec
+			     || (now.tv_sec == tv.tv_sec
+				 && now.tv_usec < tv.tv_usec)));
+
+	timeelapsed = (now.tv_sec + 1 - tv.tv_sec)*1000000
+		     + (now.tv_usec - tv.tv_usec);
 	if (count >= 1000 && timeelapsed > 0) {
 		if (default_timer == 0) {
 			/* autodetect timer */
@@ -193,7 +196,7 @@ static int lirc_claim(void)
 			return 0;
 		}
 	}
-	out(LIRC_LP_CONTROL, LP_PSELECP | LP_PINITP);
+	out(LIRC_LP_CONTROL, LP_PSELECP|LP_PINITP);
 	is_claimed = 1;
 	return 1;
 }
@@ -217,8 +220,8 @@ static void rbuf_write(int signal)
 
 static void lirc_lirc_irq_handler(void *blah)
 {
-	ktime_t kt, delkt;
-	static ktime_t lastkt;
+	struct timeval tv;
+	static struct timeval lasttv;
 	static int init;
 	long signal;
 	int data;
@@ -241,14 +244,16 @@ static void lirc_lirc_irq_handler(void *blah)
 
 #ifdef LIRC_TIMER
 	if (init) {
-		kt = ktime_get();
+		do_gettimeofday(&tv);
 
-		delkt = ktime_sub(kt, lastkt);
-		if (ktime_compare(delkt, ktime_set(15, 0)) > 0)
+		signal = tv.tv_sec - lasttv.tv_sec;
+		if (signal > 15)
 			/* really long time */
 			data = PULSE_MASK;
 		else
-			data = (int)(ktime_to_us(delkt) + LIRC_SFH506_DELAY);
+			data = (int) (signal*1000000 +
+					 tv.tv_usec - lasttv.tv_usec +
+					 LIRC_SFH506_DELAY);
 
 		rbuf_write(data); /* space */
 	} else {
@@ -264,7 +269,7 @@ static void lirc_lirc_irq_handler(void *blah)
 		init = 1;
 	}
 
-	timeout = timer / 10;	/* timeout after 1/10 sec. */
+	timeout = timer/10;	/* timeout after 1/10 sec. */
 	signal = 1;
 	level = lirc_get_timer();
 	do {
@@ -286,17 +291,17 @@ static void lirc_lirc_irq_handler(void *blah)
 		/* adjust value to usecs */
 		__u64 helper;
 
-		helper = ((__u64)signal) * 1000000;
+		helper = ((__u64) signal)*1000000;
 		do_div(helper, timer);
-		signal = (long)helper;
+		signal = (long) helper;
 
 		if (signal > LIRC_SFH506_DELAY)
 			data = signal - LIRC_SFH506_DELAY;
 		else
 			data = 1;
-		rbuf_write(PULSE_BIT | data); /* pulse */
+		rbuf_write(PULSE_BIT|data); /* pulse */
 	}
-	lastkt = ktime_get();
+	do_gettimeofday(&lasttv);
 #else
 	/* add your code here */
 #endif
@@ -331,7 +336,7 @@ static ssize_t lirc_read(struct file *filep, char __user *buf, size_t n,
 	set_current_state(TASK_INTERRUPTIBLE);
 	while (count < n) {
 		if (rptr != wptr) {
-			if (copy_to_user(buf + count, &rbuf[rptr],
+			if (copy_to_user(buf+count, &rbuf[rptr],
 					 sizeof(int))) {
 				result = -EFAULT;
 				break;
@@ -393,9 +398,9 @@ static ssize_t lirc_write(struct file *filep, const char __user *buf, size_t n,
 	for (i = 0; i < count; i++) {
 		__u64 helper;
 
-		helper = ((__u64)wbuf[i]) * timer;
+		helper = ((__u64) wbuf[i])*timer;
 		do_div(helper, 1000000);
-		wbuf[i] = (int)helper;
+		wbuf[i] = (int) helper;
 	}
 
 	local_irq_save(flags);
@@ -647,7 +652,7 @@ static int __init lirc_parallel_init(void)
 		goto exit_device_put;
 
 	pport = parport_find_base(io);
-	if (!pport) {
+	if (pport == NULL) {
 		pr_notice("no port at %x found\n", io);
 		result = -ENXIO;
 		goto exit_device_put;
@@ -656,7 +661,7 @@ static int __init lirc_parallel_init(void)
 					   pf, kf, lirc_lirc_irq_handler, 0,
 					   NULL);
 	parport_put_port(pport);
-	if (!ppdevice) {
+	if (ppdevice == NULL) {
 		pr_notice("parport_register_device() failed\n");
 		result = -ENXIO;
 		goto exit_device_put;
@@ -664,7 +669,7 @@ static int __init lirc_parallel_init(void)
 	if (parport_claim(ppdevice) != 0)
 		goto skip_init;
 	is_claimed = 1;
-	out(LIRC_LP_CONTROL, LP_PSELECP | LP_PINITP);
+	out(LIRC_LP_CONTROL, LP_PSELECP|LP_PINITP);
 
 #ifdef LIRC_TIMER
 	if (debug)
@@ -730,7 +735,7 @@ module_param(irq, int, S_IRUGO);
 MODULE_PARM_DESC(irq, "Interrupt (7 or 5)");
 
 module_param(tx_mask, int, S_IRUGO);
-MODULE_PARM_DESC(tx_mask, "Transmitter mask (default: 0x01)");
+MODULE_PARM_DESC(tx_maxk, "Transmitter mask (default: 0x01)");
 
 module_param(debug, bool, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(debug, "Enable debugging messages");

@@ -61,6 +61,7 @@ static int store_flag(struct net_bridge_port *p, unsigned long v,
 	if (flags != p->flags) {
 		p->flags = flags;
 		br_port_flags_change(p, mask);
+		br_ifinfo_notify(RTM_NEWLINK, p);
 	}
 	return 0;
 }
@@ -159,7 +160,7 @@ static BRPORT_ATTR(hold_timer, S_IRUGO, show_hold_timer, NULL);
 
 static int store_flush(struct net_bridge_port *p, unsigned long v)
 {
-	br_fdb_delete_by_port(p->br, p, 0, 0); // Don't delete local entry
+	br_fdb_delete_by_port(p->br, p, 0); // Don't delete local entry
 	return 0;
 }
 static BRPORT_ATTR(flush, S_IWUSR, NULL, store_flush);
@@ -252,10 +253,8 @@ static ssize_t brport_store(struct kobject *kobj,
 			spin_lock_bh(&p->br->lock);
 			ret = brport_attr->store(p, val);
 			spin_unlock_bh(&p->br->lock);
-			if (!ret) {
-				br_ifinfo_notify(RTM_NEWLINK, p);
+			if (ret == 0)
 				ret = count;
-			}
 		}
 		rtnl_unlock();
 	}

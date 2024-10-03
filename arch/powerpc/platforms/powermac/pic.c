@@ -258,19 +258,17 @@ static unsigned int pmac_pic_get_irq(void)
 #ifdef CONFIG_XMON
 static struct irqaction xmon_action = {
 	.handler	= xmon_irq,
-	.flags		= IRQF_NO_THREAD,
+	.flags		= 0,
 	.name		= "NMI - XMON"
 };
 #endif
 
 static struct irqaction gatwick_cascade_action = {
 	.handler	= gatwick_action,
-	.flags		= IRQF_NO_THREAD,
 	.name		= "cascade",
 };
 
-static int pmac_pic_host_match(struct irq_domain *h, struct device_node *node,
-			       enum irq_domain_bus_token bus_token)
+static int pmac_pic_host_match(struct irq_domain *h, struct device_node *node)
 {
 	/* We match all, we don't always have a node anyway */
 	return 1;

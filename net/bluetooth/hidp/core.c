@@ -401,20 +401,6 @@ static void hidp_idle_timeout(unsigned long arg)
 {
 	struct hidp_session *session = (struct hidp_session *) arg;
 
-	/* The HIDP user-space API only contains calls to add and remove
-	 * devices. There is no way to forward events of any kind. Therefore,
-	 * we have to forcefully disconnect a device on idle-timeouts. This is
-	 * unfortunate and weird API design, but it is spec-compliant and
-	 * required for backwards-compatibility. Hence, on idle-timeout, we
-	 * signal driver-detach events, so poll() will be woken up with an
-	 * error-condition on both sockets.
-	 */
-
-	session->intr_sock->sk->sk_err = EUNATCH;
-	session->ctrl_sock->sk->sk_err = EUNATCH;
-	wake_up_interruptible(sk_sleep(session->intr_sock->sk));
-	wake_up_interruptible(sk_sleep(session->ctrl_sock->sk));
-
 	hidp_session_terminate(session);
 }
 
@@ -929,7 +915,6 @@ static int hidp_session_new(struct hidp_session **out, const bdaddr_t *bdaddr,
 	session->conn = l2cap_conn_get(conn);
 	session->user.probe = hidp_session_probe;
 	session->user.remove = hidp_session_remove;
-	INIT_LIST_HEAD(&session->user.list);
 	session->ctrl_sock = ctrl_sock;
 	session->intr_sock = intr_sock;
 	skb_queue_head_init(&session->ctrl_transmit);
@@ -1328,8 +1313,7 @@ int hidp_connection_add(struct hidp_connadd_req *req,
 			struct socket *ctrl_sock,
 			struct socket *intr_sock)
 {
-	u32 valid_flags = BIT(HIDP_VIRTUAL_CABLE_UNPLUG) |
-			  BIT(HIDP_BOOT_PROTOCOL_MODE);
+	u32 valid_flags = 0;
 	struct hidp_session *session;
 	struct l2cap_conn *conn;
 	struct l2cap_chan *chan;

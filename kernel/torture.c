@@ -409,7 +409,7 @@ static void (*torture_shutdown_hook)(void);
  */
 void torture_shutdown_absorb(const char *title)
 {
-	while (READ_ONCE(fullstop) == FULLSTOP_SHUTDOWN) {
+	while (ACCESS_ONCE(fullstop) == FULLSTOP_SHUTDOWN) {
 		pr_notice("torture thread %s parking due to system shutdown\n",
 			  title);
 		schedule_timeout_uninterruptible(MAX_SCHEDULE_TIMEOUT);
@@ -451,7 +451,6 @@ static int torture_shutdown(void *arg)
 		torture_shutdown_hook();
 	else
 		VERBOSE_TOROUT_STRING("No torture_shutdown_hook(), skipping.");
-	ftrace_dump(DUMP_ALL);
 	kernel_power_off();	/* Shut down the system. */
 	return 0;
 }
@@ -481,9 +480,9 @@ static int torture_shutdown_notify(struct notifier_block *unused1,
 				   unsigned long unused2, void *unused3)
 {
 	mutex_lock(&fullstop_mutex);
-	if (READ_ONCE(fullstop) == FULLSTOP_DONTSTOP) {
+	if (ACCESS_ONCE(fullstop) == FULLSTOP_DONTSTOP) {
 		VERBOSE_TOROUT_STRING("Unscheduled system shutdown detected");
-		WRITE_ONCE(fullstop, FULLSTOP_SHUTDOWN);
+		ACCESS_ONCE(fullstop) = FULLSTOP_SHUTDOWN;
 	} else {
 		pr_warn("Concurrent rmmod and shutdown illegal!\n");
 	}
@@ -524,14 +523,13 @@ static int stutter;
  */
 void stutter_wait(const char *title)
 {
-	cond_resched_rcu_qs();
-	while (READ_ONCE(stutter_pause_test) ||
-	       (torture_runnable && !READ_ONCE(*torture_runnable))) {
+	while (ACCESS_ONCE(stutter_pause_test) ||
+	       (torture_runnable && !ACCESS_ONCE(*torture_runnable))) {
 		if (stutter_pause_test)
-			if (READ_ONCE(stutter_pause_test) == 1)
+			if (ACCESS_ONCE(stutter_pause_test) == 1)
 				schedule_timeout_interruptible(1);
 			else
-				while (READ_ONCE(stutter_pause_test))
+				while (ACCESS_ONCE(stutter_pause_test))
 					cond_resched();
 		else
 			schedule_timeout_interruptible(round_jiffies_relative(HZ));
@@ -551,14 +549,14 @@ static int torture_stutter(void *arg)
 		if (!torture_must_stop()) {
 			if (stutter > 1) {
 				schedule_timeout_interruptible(stutter - 1);
-				WRITE_ONCE(stutter_pause_test, 2);
+				ACCESS_ONCE(stutter_pause_test) = 2;
 			}
 			schedule_timeout_interruptible(1);
-			WRITE_ONCE(stutter_pause_test, 1);
+			ACCESS_ONCE(stutter_pause_test) = 1;
 		}
 		if (!torture_must_stop())
 			schedule_timeout_interruptible(stutter);
-		WRITE_ONCE(stutter_pause_test, 0);
+		ACCESS_ONCE(stutter_pause_test) = 0;
 		torture_shutdown_absorb("torture_stutter");
 	} while (!torture_must_stop());
 	torture_kthread_stopping("torture_stutter");
@@ -603,9 +601,8 @@ bool torture_init_begin(char *ttype, bool v, int *runnable)
 {
 	mutex_lock(&fullstop_mutex);
 	if (torture_type != NULL) {
-		pr_alert("torture_init_begin: Refusing %s init: %s running.\n",
+		pr_alert("torture_init_begin: refusing %s init: %s running",
 			 ttype, torture_type);
-		pr_alert("torture_init_begin: One torture test at a time!\n");
 		mutex_unlock(&fullstop_mutex);
 		return false;
 	}
@@ -645,13 +642,13 @@ EXPORT_SYMBOL_GPL(torture_init_end);
 bool torture_cleanup_begin(void)
 {
 	mutex_lock(&fullstop_mutex);
-	if (READ_ONCE(fullstop) == FULLSTOP_SHUTDOWN) {
+	if (ACCESS_ONCE(fullstop) == FULLSTOP_SHUTDOWN) {
 		pr_warn("Concurrent rmmod and shutdown illegal!\n");
 		mutex_unlock(&fullstop_mutex);
 		schedule_timeout_uninterruptible(10);
 		return true;
 	}
-	WRITE_ONCE(fullstop, FULLSTOP_RMMOD);
+	ACCESS_ONCE(fullstop) = FULLSTOP_RMMOD;
 	mutex_unlock(&fullstop_mutex);
 	torture_shutdown_cleanup();
 	torture_shuffle_cleanup();
@@ -684,7 +681,7 @@ EXPORT_SYMBOL_GPL(torture_must_stop);
  */
 bool torture_must_stop_irq(void)
 {
-	return READ_ONCE(fullstop) != FULLSTOP_DONTSTOP;
+	return ACCESS_ONCE(fullstop) != FULLSTOP_DONTSTOP;
 }
 EXPORT_SYMBOL_GPL(torture_must_stop_irq);
 

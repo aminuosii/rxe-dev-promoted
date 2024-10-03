@@ -165,147 +165,66 @@ validate_ascii_string(efi_char16_t *var_name, int match, u8 *buffer,
 }
 
 struct variable_validate {
-	efi_guid_t vendor;
 	char *name;
 	bool (*validate)(efi_char16_t *var_name, int match, u8 *data,
 			 unsigned long len);
 };
 
-/*
- * This is the list of variables we need to validate, as well as the
- * whitelist for what we think is safe not to default to immutable.
- *
- * If it has a validate() method that's not NULL, it'll go into the
- * validation routine.  If not, it is assumed valid, but still used for
- * whitelisting.
- *
- * Note that it's sorted by {vendor,name}, but globbed names must come after
- * any other name with the same prefix.
- */
 static const struct variable_validate variable_validate[] = {
-	{ EFI_GLOBAL_VARIABLE_GUID, "BootNext", validate_uint16 },
-	{ EFI_GLOBAL_VARIABLE_GUID, "BootOrder", validate_boot_order },
-	{ EFI_GLOBAL_VARIABLE_GUID, "Boot*", validate_load_option },
-	{ EFI_GLOBAL_VARIABLE_GUID, "DriverOrder", validate_boot_order },
-	{ EFI_GLOBAL_VARIABLE_GUID, "Driver*", validate_load_option },
-	{ EFI_GLOBAL_VARIABLE_GUID, "ConIn", validate_device_path },
-	{ EFI_GLOBAL_VARIABLE_GUID, "ConInDev", validate_device_path },
-	{ EFI_GLOBAL_VARIABLE_GUID, "ConOut", validate_device_path },
-	{ EFI_GLOBAL_VARIABLE_GUID, "ConOutDev", validate_device_path },
-	{ EFI_GLOBAL_VARIABLE_GUID, "ErrOut", validate_device_path },
-	{ EFI_GLOBAL_VARIABLE_GUID, "ErrOutDev", validate_device_path },
-	{ EFI_GLOBAL_VARIABLE_GUID, "Lang", validate_ascii_string },
-	{ EFI_GLOBAL_VARIABLE_GUID, "OsIndications", NULL },
-	{ EFI_GLOBAL_VARIABLE_GUID, "PlatformLang", validate_ascii_string },
-	{ EFI_GLOBAL_VARIABLE_GUID, "Timeout", validate_uint16 },
-	{ LINUX_EFI_CRASH_GUID, "*", NULL },
-	{ NULL_GUID, "", NULL },
+	{ "BootNext", validate_uint16 },
+	{ "BootOrder", validate_boot_order },
+	{ "DriverOrder", validate_boot_order },
+	{ "Boot*", validate_load_option },
+	{ "Driver*", validate_load_option },
+	{ "ConIn", validate_device_path },
+	{ "ConInDev", validate_device_path },
+	{ "ConOut", validate_device_path },
+	{ "ConOutDev", validate_device_path },
+	{ "ErrOut", validate_device_path },
+	{ "ErrOutDev", validate_device_path },
+	{ "Timeout", validate_uint16 },
+	{ "Lang", validate_ascii_string },
+	{ "PlatformLang", validate_ascii_string },
+	{ "", NULL },
 };
 
-/*
- * Check if @var_name matches the pattern given in @match_name.
- *
- * @var_name: an array of @len non-NUL characters.
- * @match_name: a NUL-terminated pattern string, optionally ending in "*". A
- *              final "*" character matches any trailing characters @var_name,
- *              including the case when there are none left in @var_name.
- * @match: on output, the number of non-wildcard characters in @match_name
- *         that @var_name matches, regardless of the return value.
- * @return: whether @var_name fully matches @match_name.
- */
-static bool
-variable_matches(const char *var_name, size_t len, const char *match_name,
-		 int *match)
-{
-	for (*match = 0; ; (*match)++) {
-		char c = match_name[*match];
-
-		switch (c) {
-		case '*':
-			/* Wildcard in @match_name means we've matched. */
-			return true;
-
-		case '\0':
-			/* @match_name has ended. Has @var_name too? */
-			return (*match == len);
-
-		default:
-			/*
-			 * We've reached a non-wildcard char in @match_name.
-			 * Continue only if there's an identical character in
-			 * @var_name.
-			 */
-			if (*match < len && c == var_name[*match])
-				continue;
-			return false;
-		}
-	}
-}
-
 bool
-efivar_validate(efi_guid_t vendor, efi_char16_t *var_name, u8 *data,
-		unsigned long data_size)
+efivar_validate(efi_char16_t *var_name, u8 *data, unsigned long len)
 {
 	int i;
-	unsigned long utf8_size;
-	u8 *utf8_name;
+	u16 *unicode_name = var_name;
 
-	utf8_size = ucs2_utf8size(var_name);
-	utf8_name = kmalloc(utf8_size + 1, GFP_KERNEL);
-	if (!utf8_name)
-		return false;
-
-	ucs2_as_utf8(utf8_name, var_name, utf8_size);
-	utf8_name[utf8_size] = '\0';
-
-	for (i = 0; variable_validate[i].name[0] != '\0'; i++) {
+	for (i = 0; variable_validate[i].validate != NULL; i++) {
 		const char *name = variable_validate[i].name;
-		int match = 0;
+		int match;
 
-		if (efi_guidcmp(vendor, variable_validate[i].vendor))
-			continue;
+		for (match = 0; ; match++) {
+			char c = name[match];
+			u16 u = unicode_name[match];
 
-		if (variable_matches(utf8_name, utf8_size+1, name, &match)) {
-			if (variable_validate[i].validate == NULL)
+			/* All special variables are plain ascii */
+			if (u > 127)
+				return true;
+
+			/* Wildcard in the matching name means we've matched */
+			if (c == '*')
+				return variable_validate[i].validate(var_name,
+							     match, data, len);
+
+			/* Case sensitive match */
+			if (c != u)
 				break;
-			kfree(utf8_name);
-			return variable_validate[i].validate(var_name, match,
-							     data, data_size);
+
+			/* Reached the end of the string while matching */
+			if (!c)
+				return variable_validate[i].validate(var_name,
+							     match, data, len);
 		}
 	}
-	kfree(utf8_name);
+
 	return true;
 }
 EXPORT_SYMBOL_GPL(efivar_validate);
-
-bool
-efivar_variable_is_removable(efi_guid_t vendor, const char *var_name,
-			     size_t len)
-{
-	int i;
-	bool found = false;
-	int match = 0;
-
-	/*
-	 * Check if our variable is in the validated variables list
-	 */
-	for (i = 0; variable_validate[i].name[0] != '\0'; i++) {
-		if (efi_guidcmp(variable_validate[i].vendor, vendor))
-			continue;
-
-		if (variable_matches(var_name, len,
-				     variable_validate[i].name, &match)) {
-			found = true;
-			break;
-		}
-	}
-
-	/*
-	 * If it's in our list, it is removable.
-	 */
-	return found;
-}
-EXPORT_SYMBOL_GPL(efivar_variable_is_removable);
 
 static efi_status_t
 check_var_size(u32 attributes, unsigned long size)
@@ -315,18 +234,40 @@ check_var_size(u32 attributes, unsigned long size)
 	if (!fops->query_variable_store)
 		return EFI_UNSUPPORTED;
 
-	return fops->query_variable_store(attributes, size, false);
+	return fops->query_variable_store(attributes, size);
 }
 
-static efi_status_t
-check_var_size_nonblocking(u32 attributes, unsigned long size)
+static int efi_status_to_err(efi_status_t status)
 {
-	const struct efivar_operations *fops = __efivars->ops;
+	int err;
 
-	if (!fops->query_variable_store)
-		return EFI_UNSUPPORTED;
+	switch (status) {
+	case EFI_SUCCESS:
+		err = 0;
+		break;
+	case EFI_INVALID_PARAMETER:
+		err = -EINVAL;
+		break;
+	case EFI_OUT_OF_RESOURCES:
+		err = -ENOSPC;
+		break;
+	case EFI_DEVICE_ERROR:
+		err = -EIO;
+		break;
+	case EFI_WRITE_PROTECTED:
+		err = -EROFS;
+		break;
+	case EFI_SECURITY_VIOLATION:
+		err = -EACCES;
+		break;
+	case EFI_NOT_FOUND:
+		err = -ENOENT;
+		break;
+	default:
+		err = -EINVAL;
+	}
 
-	return fops->query_variable_store(attributes, size, true);
+	return err;
 }
 
 static bool variable_is_present(efi_char16_t *variable_name, efi_guid_t *vendor,
@@ -419,7 +360,8 @@ static void dup_variable_bug(efi_char16_t *str16, efi_guid_t *vendor_guid,
  * Returns 0 on success, or a kernel error code on failure.
  */
 int efivar_init(int (*func)(efi_char16_t *, efi_guid_t, unsigned long, void *),
-		void *data, bool duplicates, struct list_head *head)
+		void *data, bool atomic, bool duplicates,
+		struct list_head *head)
 {
 	const struct efivar_operations *ops = __efivars->ops;
 	unsigned long variable_name_size = 1024;
@@ -449,7 +391,7 @@ int efivar_init(int (*func)(efi_char16_t *, efi_guid_t, unsigned long, void *),
 						&vendor_guid);
 		switch (status) {
 		case EFI_SUCCESS:
-			if (duplicates)
+			if (!atomic)
 				spin_unlock_irq(&__efivars->lock);
 
 			variable_name_size = var_name_strnsize(variable_name,
@@ -464,19 +406,21 @@ int efivar_init(int (*func)(efi_char16_t *, efi_guid_t, unsigned long, void *),
 			 * and may end up looping here forever.
 			 */
 			if (duplicates &&
-			    variable_is_present(variable_name, &vendor_guid,
-						head)) {
+			    variable_is_present(variable_name, &vendor_guid, head)) {
 				dup_variable_bug(variable_name, &vendor_guid,
 						 variable_name_size);
+				if (!atomic)
+					spin_lock_irq(&__efivars->lock);
+
 				status = EFI_NOT_FOUND;
-			} else {
-				err = func(variable_name, vendor_guid,
-					   variable_name_size, data);
-				if (err)
-					status = EFI_NOT_FOUND;
+				break;
 			}
 
-			if (duplicates)
+			err = func(variable_name, vendor_guid, variable_name_size, data);
+			if (err)
+				status = EFI_NOT_FOUND;
+
+			if (!atomic)
 				spin_lock_irq(&__efivars->lock);
 
 			break;
@@ -671,8 +615,7 @@ efivar_entry_set_nonblocking(efi_char16_t *name, efi_guid_t vendor,
 	if (!spin_trylock_irqsave(&__efivars->lock, flags))
 		return -EBUSY;
 
-	status = check_var_size_nonblocking(attributes,
-					    size + ucs2_strsize(name, 1024));
+	status = check_var_size(attributes, size + ucs2_strsize(name, 1024));
 	if (status != EFI_SUCCESS) {
 		spin_unlock_irqrestore(&__efivars->lock, flags);
 		return -ENOSPC;
@@ -909,7 +852,7 @@ int efivar_entry_set_get_size(struct efivar_entry *entry, u32 attributes,
 
 	*set = false;
 
-	if (efivar_validate(*vendor, name, data, *size) == false)
+	if (efivar_validate(name, data, *size) == false)
 		return -EINVAL;
 
 	/*

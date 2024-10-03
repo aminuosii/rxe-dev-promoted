@@ -171,14 +171,14 @@ static int gfs2_check_sb(struct gfs2_sbd *sdp, int silent)
 	return -EINVAL;
 }
 
-static void end_bio_io_page(struct bio *bio)
+static void end_bio_io_page(struct bio *bio, int error)
 {
 	struct page *page = bio->bi_private;
 
-	if (!bio->bi_error)
+	if (!error)
 		SetPageUptodate(page);
 	else
-		pr_warn("error %d reading superblock\n", bio->bi_error);
+		pr_warn("error %d reading superblock\n", error);
 	unlock_page(page);
 }
 
@@ -352,9 +352,6 @@ static int gfs2_read_sb(struct gfs2_sbd *sdp, int silent)
 	sdp->sd_jheightsize[x] = ~0;
 	gfs2_assert(sdp, sdp->sd_max_jheight <= GFS2_MAX_META_HEIGHT);
 
-	sdp->sd_max_dents_per_leaf = (sdp->sd_sb.sb_bsize -
-				      sizeof(struct gfs2_leaf)) /
-				     GFS2_MIN_DIRENT_SIZE;
 	return 0;
 }
 
@@ -454,7 +451,7 @@ static int gfs2_lookup_root(struct super_block *sb, struct dentry **dptr,
 	struct dentry *dentry;
 	struct inode *inode;
 
-	inode = gfs2_inode_lookup(sb, DT_DIR, no_addr, 0);
+	inode = gfs2_inode_lookup(sb, DT_DIR, no_addr, 0, 0);
 	if (IS_ERR(inode)) {
 		fs_err(sdp, "can't read in %s inode: %ld\n", name, PTR_ERR(inode));
 		return PTR_ERR(inode);
@@ -650,7 +647,7 @@ out_unlock:
 
 static int init_journal(struct gfs2_sbd *sdp, int undo)
 {
-	struct inode *master = d_inode(sdp->sd_master_dir);
+	struct inode *master = sdp->sd_master_dir->d_inode;
 	struct gfs2_holder ji_gh;
 	struct gfs2_inode *ip;
 	int jindex = 1;
@@ -759,7 +756,6 @@ static int init_journal(struct gfs2_sbd *sdp, int undo)
 		}
 	}
 
-	sdp->sd_log_idle = 1;
 	set_bit(SDF_JOURNAL_CHECKED, &sdp->sd_flags);
 	gfs2_glock_dq_uninit(&ji_gh);
 	jindex = 0;
@@ -786,7 +782,7 @@ static struct lock_class_key gfs2_quota_imutex_key;
 static int init_inodes(struct gfs2_sbd *sdp, int undo)
 {
 	int error = 0;
-	struct inode *master = d_inode(sdp->sd_master_dir);
+	struct inode *master = sdp->sd_master_dir->d_inode;
 
 	if (undo)
 		goto fail_qinode;
@@ -824,7 +820,7 @@ static int init_inodes(struct gfs2_sbd *sdp, int undo)
 	 * i_mutex on quota files is special. Since this inode is hidden system
 	 * file, we are safe to define locking ourselves.
 	 */
-	lockdep_set_class(&sdp->sd_quota_inode->i_rwsem,
+	lockdep_set_class(&sdp->sd_quota_inode->i_mutex,
 			  &gfs2_quota_imutex_key);
 
 	error = gfs2_rindex_update(sdp);
@@ -852,7 +848,7 @@ static int init_per_node(struct gfs2_sbd *sdp, int undo)
 	char buf[30];
 	int error = 0;
 	struct gfs2_inode *ip;
-	struct inode *master = d_inode(sdp->sd_master_dir);
+	struct inode *master = sdp->sd_master_dir->d_inode;
 
 	if (sdp->sd_args.ar_spectator)
 		return 0;
@@ -913,7 +909,8 @@ fail_qc_i:
 fail_ut_i:
 	iput(sdp->sd_sc_inode);
 fail:
-	iput(pn);
+	if (pn)
+		iput(pn);
 	return error;
 }
 
@@ -1293,9 +1290,6 @@ static struct dentry *gfs2_mount(struct file_system_type *fs_type, int flags,
 		up_write(&s->s_umount);
 		blkdev_put(bdev, mode);
 		down_write(&s->s_umount);
-	} else {
-		/* s_mode must be set before deactivate_locked_super calls */
-		s->s_mode = mode;
 	}
 
 	memset(&args, 0, sizeof(args));
@@ -1317,7 +1311,10 @@ static struct dentry *gfs2_mount(struct file_system_type *fs_type, int flags,
 		if ((flags ^ s->s_flags) & MS_RDONLY)
 			goto error_super;
 	} else {
-		snprintf(s->s_id, sizeof(s->s_id), "%pg", bdev);
+		char b[BDEVNAME_SIZE];
+
+		s->s_mode = mode;
+		strlcpy(s->s_id, bdevname(bdev, b), sizeof(s->s_id));
 		sb_set_blocksize(s, block_size(bdev));
 		error = fill_super(s, &args, flags & MS_SILENT ? 1 : 0);
 		if (error)
@@ -1360,7 +1357,7 @@ static struct dentry *gfs2_mount_meta(struct file_system_type *fs_type,
 		return ERR_PTR(error);
 	}
 	s = sget(&gfs2_fs_type, test_gfs2_super, set_meta_super, flags,
-		 path.dentry->d_sb->s_bdev);
+		 path.dentry->d_inode->i_sb->s_bdev);
 	path_put(&path);
 	if (IS_ERR(s)) {
 		pr_warn("gfs2 mount does not exist\n");

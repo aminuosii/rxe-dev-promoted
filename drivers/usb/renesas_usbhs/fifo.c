@@ -46,7 +46,7 @@ static int usbhsf_null_handle(struct usbhs_pkt *pkt, int *is_done)
 	return -EINVAL;
 }
 
-static const struct usbhs_pkt_handle usbhsf_null_handler = {
+static struct usbhs_pkt_handle usbhsf_null_handler = {
 	.prepare = usbhsf_null_handle,
 	.try_run = usbhsf_null_handle,
 };
@@ -190,8 +190,7 @@ static int usbhsf_pkt_handler(struct usbhs_pipe *pipe, int type)
 		goto __usbhs_pkt_handler_end;
 	}
 
-	if (likely(func))
-		ret = func(pkt, &is_done);
+	ret = func(pkt, &is_done);
 
 	if (is_done)
 		__usbhsf_pkt_del(pkt);
@@ -423,12 +422,12 @@ static int usbhs_dcp_dir_switch_done(struct usbhs_pkt *pkt, int *is_done)
 	return 0;
 }
 
-const struct usbhs_pkt_handle usbhs_dcp_status_stage_in_handler = {
+struct usbhs_pkt_handle usbhs_dcp_status_stage_in_handler = {
 	.prepare = usbhs_dcp_dir_switch_to_write,
 	.try_run = usbhs_dcp_dir_switch_done,
 };
 
-const struct usbhs_pkt_handle usbhs_dcp_status_stage_out_handler = {
+struct usbhs_pkt_handle usbhs_dcp_status_stage_out_handler = {
 	.prepare = usbhs_dcp_dir_switch_to_read,
 	.try_run = usbhs_dcp_dir_switch_done,
 };
@@ -450,7 +449,7 @@ static int usbhsf_dcp_data_stage_try_push(struct usbhs_pkt *pkt, int *is_done)
 	return pkt->handler->prepare(pkt, is_done);
 }
 
-const struct usbhs_pkt_handle usbhs_dcp_data_stage_out_handler = {
+struct usbhs_pkt_handle usbhs_dcp_data_stage_out_handler = {
 	.prepare = usbhsf_dcp_data_stage_try_push,
 };
 
@@ -489,7 +488,7 @@ static int usbhsf_dcp_data_stage_prepare_pop(struct usbhs_pkt *pkt,
 	return pkt->handler->prepare(pkt, is_done);
 }
 
-const struct usbhs_pkt_handle usbhs_dcp_data_stage_in_handler = {
+struct usbhs_pkt_handle usbhs_dcp_data_stage_in_handler = {
 	.prepare = usbhsf_dcp_data_stage_prepare_pop,
 };
 
@@ -601,7 +600,7 @@ static int usbhsf_pio_prepare_push(struct usbhs_pkt *pkt, int *is_done)
 	return usbhsf_pio_try_push(pkt, is_done);
 }
 
-const struct usbhs_pkt_handle usbhs_fifo_pio_push_handler = {
+struct usbhs_pkt_handle usbhs_fifo_pio_push_handler = {
 	.prepare = usbhsf_pio_prepare_push,
 	.try_run = usbhsf_pio_try_push,
 };
@@ -612,8 +611,6 @@ const struct usbhs_pkt_handle usbhs_fifo_pio_push_handler = {
 static int usbhsf_prepare_pop(struct usbhs_pkt *pkt, int *is_done)
 {
 	struct usbhs_pipe *pipe = pkt->pipe;
-	struct usbhs_priv *priv = usbhs_pipe_to_priv(pipe);
-	struct usbhs_fifo *fifo = usbhsf_get_cfifo(priv);
 
 	if (usbhs_pipe_is_busy(pipe))
 		return 0;
@@ -626,9 +623,6 @@ static int usbhsf_prepare_pop(struct usbhs_pkt *pkt, int *is_done)
 	 */
 	usbhs_pipe_data_sequence(pipe, pkt->sequence);
 	pkt->sequence = -1; /* -1 sequence will be ignored */
-
-	if (usbhs_pipe_is_dcp(pipe))
-		usbhsf_fifo_clear(pipe, fifo);
 
 	usbhs_pipe_set_trans_count_if_bulk(pipe, pkt->length);
 	usbhs_pipe_enable(pipe);
@@ -679,14 +673,7 @@ static int usbhsf_pio_try_pop(struct usbhs_pkt *pkt, int *is_done)
 		*is_done = 1;
 		usbhsf_rx_irq_ctrl(pipe, 0);
 		usbhs_pipe_running(pipe, 0);
-		/*
-		 * If function mode, since this controller is possible to enter
-		 * Control Write status stage at this timing, this driver
-		 * should not disable the pipe. If such a case happens, this
-		 * controller is not able to complete the status stage.
-		 */
-		if (!usbhs_mod_is_host(priv) && !usbhs_pipe_is_dcp(pipe))
-			usbhs_pipe_disable(pipe);	/* disable pipe first */
+		usbhs_pipe_disable(pipe);	/* disable pipe first */
 	}
 
 	/*
@@ -731,7 +718,7 @@ usbhs_fifo_read_busy:
 	return ret;
 }
 
-const struct usbhs_pkt_handle usbhs_fifo_pio_pop_handler = {
+struct usbhs_pkt_handle usbhs_fifo_pio_pop_handler = {
 	.prepare = usbhsf_prepare_pop,
 	.try_run = usbhsf_pio_try_pop,
 };
@@ -748,7 +735,7 @@ static int usbhsf_ctrl_stage_end(struct usbhs_pkt *pkt, int *is_done)
 	return 0;
 }
 
-const struct usbhs_pkt_handle usbhs_ctrl_stage_end_handler = {
+struct usbhs_pkt_handle usbhs_ctrl_stage_end_handler = {
 	.prepare = usbhsf_ctrl_stage_end,
 	.try_run = usbhsf_ctrl_stage_end,
 };
@@ -799,10 +786,8 @@ static int __usbhsf_dma_map_ctrl(struct usbhs_pkt *pkt, int map)
 	struct usbhs_pipe *pipe = pkt->pipe;
 	struct usbhs_priv *priv = usbhs_pipe_to_priv(pipe);
 	struct usbhs_pipe_info *info = usbhs_priv_to_pipeinfo(priv);
-	struct usbhs_fifo *fifo = usbhs_pipe_to_fifo(pipe);
-	struct dma_chan *chan = usbhsf_dma_chan_get(fifo, pkt);
 
-	return info->dma_map_ctrl(chan->device->dev, pkt, map);
+	return info->dma_map_ctrl(pkt, map);
 }
 
 static void usbhsf_dma_complete(void *arg);
@@ -883,23 +868,22 @@ static int usbhsf_dma_prepare_push(struct usbhs_pkt *pkt, int *is_done)
 	if (!fifo)
 		goto usbhsf_pio_prepare_push;
 
-	ret = usbhsf_fifo_select(pipe, fifo, 0);
-	if (ret < 0)
+	if (usbhsf_dma_map(pkt) < 0)
 		goto usbhsf_pio_prepare_push;
 
-	if (usbhsf_dma_map(pkt) < 0)
-		goto usbhsf_pio_prepare_push_unselect;
+	ret = usbhsf_fifo_select(pipe, fifo, 0);
+	if (ret < 0)
+		goto usbhsf_pio_prepare_push_unmap;
 
 	pkt->trans = len;
 
-	usbhsf_tx_irq_ctrl(pipe, 0);
 	INIT_WORK(&pkt->work, xfer_work);
 	schedule_work(&pkt->work);
 
 	return 0;
 
-usbhsf_pio_prepare_push_unselect:
-	usbhsf_fifo_unselect(pipe, fifo);
+usbhsf_pio_prepare_push_unmap:
+	usbhsf_dma_unmap(pkt);
 usbhsf_pio_prepare_push:
 	/*
 	 * change handler to PIO
@@ -938,7 +922,7 @@ static int usbhsf_dma_push_done(struct usbhs_pkt *pkt, int *is_done)
 	return 0;
 }
 
-const struct usbhs_pkt_handle usbhs_fifo_dma_push_handler = {
+struct usbhs_pkt_handle usbhs_fifo_dma_push_handler = {
 	.prepare	= usbhsf_dma_prepare_push,
 	.dma_done	= usbhsf_dma_push_done,
 };
@@ -1186,7 +1170,7 @@ static int usbhsf_dma_pop_done(struct usbhs_pkt *pkt, int *is_done)
 		return usbhsf_dma_pop_done_with_rx_irq(pkt, is_done);
 }
 
-const struct usbhs_pkt_handle usbhs_fifo_dma_pop_handler = {
+struct usbhs_pkt_handle usbhs_fifo_dma_pop_handler = {
 	.prepare	= usbhsf_dma_prepare_pop,
 	.try_run	= usbhsf_dma_try_pop,
 	.dma_done	= usbhsf_dma_pop_done
@@ -1243,21 +1227,15 @@ static void usbhsf_dma_init_dt(struct device *dev, struct usbhs_fifo *fifo,
 {
 	char name[16];
 
-	/*
-	 * To avoid complex handing for DnFIFOs, the driver uses each
-	 * DnFIFO as TX or RX direction (not bi-direction).
-	 * So, the driver uses odd channels for TX, even channels for RX.
-	 */
-	snprintf(name, sizeof(name), "ch%d", channel);
-	if (channel & 1) {
-		fifo->tx_chan = dma_request_slave_channel_reason(dev, name);
-		if (IS_ERR(fifo->tx_chan))
-			fifo->tx_chan = NULL;
-	} else {
-		fifo->rx_chan = dma_request_slave_channel_reason(dev, name);
-		if (IS_ERR(fifo->rx_chan))
-			fifo->rx_chan = NULL;
-	}
+	snprintf(name, sizeof(name), "tx%d", channel);
+	fifo->tx_chan = dma_request_slave_channel_reason(dev, name);
+	if (IS_ERR(fifo->tx_chan))
+		fifo->tx_chan = NULL;
+
+	snprintf(name, sizeof(name), "rx%d", channel);
+	fifo->rx_chan = dma_request_slave_channel_reason(dev, name);
+	if (IS_ERR(fifo->rx_chan))
+		fifo->rx_chan = NULL;
 }
 
 static void usbhsf_dma_init(struct usbhs_priv *priv, struct usbhs_fifo *fifo,

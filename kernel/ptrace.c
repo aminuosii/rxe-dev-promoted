@@ -73,11 +73,12 @@ void __ptrace_unlink(struct task_struct *child)
 {
 	BUG_ON(!child->ptrace);
 
+	child->ptrace = 0;
 	child->parent = child->real_parent;
 	list_del_init(&child->ptrace_entry);
 
 	spin_lock(&child->sighand->siglock);
-	child->ptrace = 0;
+
 	/*
 	 * Clear all pending traps and TRAPPING.  TRAPPING should be
 	 * cleared regardless of JOBCTL_STOP_PENDING.  Do it explicitly.
@@ -218,14 +219,6 @@ static int ptrace_has_cap(struct user_namespace *ns, unsigned int mode)
 static int __ptrace_may_access(struct task_struct *task, unsigned int mode)
 {
 	const struct cred *cred = current_cred(), *tcred;
-	int dumpable = 0;
-	kuid_t caller_uid;
-	kgid_t caller_gid;
-
-	if (!(mode & PTRACE_MODE_FSCREDS) == !(mode & PTRACE_MODE_REALCREDS)) {
-		WARN(1, "denying ptrace access check without PTRACE_MODE_*CREDS\n");
-		return -EPERM;
-	}
 
 	/* May we inspect the given task?
 	 * This check is used both for attaching with ptrace
@@ -235,33 +228,18 @@ static int __ptrace_may_access(struct task_struct *task, unsigned int mode)
 	 * because setting up the necessary parent/child relationship
 	 * or halting the specified task is impossible.
 	 */
-
+	int dumpable = 0;
 	/* Don't let security modules deny introspection */
 	if (same_thread_group(task, current))
 		return 0;
 	rcu_read_lock();
-	if (mode & PTRACE_MODE_FSCREDS) {
-		caller_uid = cred->fsuid;
-		caller_gid = cred->fsgid;
-	} else {
-		/*
-		 * Using the euid would make more sense here, but something
-		 * in userland might rely on the old behavior, and this
-		 * shouldn't be a security problem since
-		 * PTRACE_MODE_REALCREDS implies that the caller explicitly
-		 * used a syscall that requests access to another process
-		 * (and not a filesystem syscall to procfs).
-		 */
-		caller_uid = cred->uid;
-		caller_gid = cred->gid;
-	}
 	tcred = __task_cred(task);
-	if (uid_eq(caller_uid, tcred->euid) &&
-	    uid_eq(caller_uid, tcred->suid) &&
-	    uid_eq(caller_uid, tcred->uid)  &&
-	    gid_eq(caller_gid, tcred->egid) &&
-	    gid_eq(caller_gid, tcred->sgid) &&
-	    gid_eq(caller_gid, tcred->gid))
+	if (uid_eq(cred->uid, tcred->euid) &&
+	    uid_eq(cred->uid, tcred->suid) &&
+	    uid_eq(cred->uid, tcred->uid)  &&
+	    gid_eq(cred->gid, tcred->egid) &&
+	    gid_eq(cred->gid, tcred->sgid) &&
+	    gid_eq(cred->gid, tcred->gid))
 		goto ok;
 	if (ptrace_has_cap(tcred->user_ns, mode))
 		goto ok;
@@ -328,7 +306,7 @@ static int ptrace_attach(struct task_struct *task, long request,
 		goto out;
 
 	task_lock(task);
-	retval = __ptrace_may_access(task, PTRACE_MODE_ATTACH_REALCREDS);
+	retval = __ptrace_may_access(task, PTRACE_MODE_ATTACH);
 	task_unlock(task);
 	if (retval)
 		goto unlock_creds;
@@ -386,14 +364,8 @@ unlock_creds:
 	mutex_unlock(&task->signal->cred_guard_mutex);
 out:
 	if (!retval) {
-		/*
-		 * We do not bother to change retval or clear JOBCTL_TRAPPING
-		 * if wait_on_bit() was interrupted by SIGKILL. The tracer will
-		 * not return to user-mode, it will exit and clear this bit in
-		 * __ptrace_unlink() if it wasn't already cleared by the tracee;
-		 * and until then nobody can ptrace this task.
-		 */
-		wait_on_bit(&task->jobctl, JOBCTL_TRAPPING_BIT, TASK_KILLABLE);
+		wait_on_bit(&task->jobctl, JOBCTL_TRAPPING_BIT,
+			    TASK_UNINTERRUPTIBLE);
 		proc_ptrace_connector(task, PTRACE_ATTACH);
 	}
 
@@ -584,19 +556,6 @@ static int ptrace_setoptions(struct task_struct *child, unsigned long data)
 	if (data & ~(unsigned long)PTRACE_O_MASK)
 		return -EINVAL;
 
-	if (unlikely(data & PTRACE_O_SUSPEND_SECCOMP)) {
-		if (!config_enabled(CONFIG_CHECKPOINT_RESTORE) ||
-		    !config_enabled(CONFIG_SECCOMP))
-			return -EINVAL;
-
-		if (!capable(CAP_SYS_ADMIN))
-			return -EPERM;
-
-		if (seccomp_mode(&current->seccomp) != SECCOMP_MODE_DISABLED ||
-		    current->ptrace & PT_SUSPEND_SECCOMP)
-			return -EPERM;
-	}
-
 	/* Avoid intermediate state when all opts are cleared */
 	flags = child->ptrace;
 	flags &= ~(PTRACE_O_MASK << PT_OPT_FLAG_SHIFT);
@@ -680,7 +639,7 @@ static int ptrace_peek_siginfo(struct task_struct *child,
 			break;
 
 #ifdef CONFIG_COMPAT
-		if (unlikely(in_compat_syscall())) {
+		if (unlikely(is_compat_task())) {
 			compat_siginfo_t __user *uinfo = compat_ptr(data);
 
 			if (copy_siginfo_to_user32(uinfo, &info) ||
@@ -1044,11 +1003,6 @@ int ptrace_request(struct task_struct *child, long request,
 		break;
 	}
 #endif
-
-	case PTRACE_SECCOMP_GET_FILTER:
-		ret = seccomp_get_filter(child, addr, datavp);
-		break;
-
 	default:
 		break;
 	}

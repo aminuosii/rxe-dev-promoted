@@ -250,7 +250,6 @@ struct fsi_clk {
 
 struct fsi_priv {
 	void __iomem *base;
-	phys_addr_t phys;
 	struct fsi_master *master;
 
 	struct fsi_stream playback;
@@ -1362,31 +1361,23 @@ static int fsi_dma_push_start_stop(struct fsi_priv *fsi, struct fsi_stream *io,
 
 static int fsi_dma_probe(struct fsi_priv *fsi, struct fsi_stream *io, struct device *dev)
 {
+	dma_cap_mask_t mask;
 	int is_play = fsi_stream_is_play(fsi, io);
 
-#ifdef CONFIG_SUPERH
-	dma_cap_mask_t mask;
 	dma_cap_zero(mask);
 	dma_cap_set(DMA_SLAVE, mask);
 
-	io->chan = dma_request_channel(mask, shdma_chan_filter,
-				       (void *)io->dma_id);
-#else
-	io->chan = dma_request_slave_channel(dev, is_play ? "tx" : "rx");
-#endif
+	io->chan = dma_request_slave_channel_compat(mask,
+				shdma_chan_filter, (void *)io->dma_id,
+				dev, is_play ? "tx" : "rx");
 	if (io->chan) {
-		struct dma_slave_config cfg = {};
+		struct dma_slave_config cfg;
 		int ret;
 
-		if (is_play) {
-			cfg.dst_addr		= fsi->phys + REG_DODT;
-			cfg.dst_addr_width	= DMA_SLAVE_BUSWIDTH_4_BYTES;
-			cfg.direction		= DMA_MEM_TO_DEV;
-		} else {
-			cfg.src_addr		= fsi->phys + REG_DIDT;
-			cfg.src_addr_width	= DMA_SLAVE_BUSWIDTH_4_BYTES;
-			cfg.direction		= DMA_DEV_TO_MEM;
-		}
+		cfg.slave_id	= io->dma_id;
+		cfg.dst_addr	= 0; /* use default addr */
+		cfg.src_addr	= 0; /* use default addr */
+		cfg.direction	= is_play ? DMA_MEM_TO_DEV : DMA_DEV_TO_MEM;
 
 		ret = dmaengine_slave_config(io->chan, &cfg);
 		if (ret < 0) {
@@ -1914,6 +1905,7 @@ MODULE_DEVICE_TABLE(of, fsi_of_match);
 
 static const struct platform_device_id fsi_id_table[] = {
 	{ "sh_fsi",	(kernel_ulong_t)&fsi1_core },
+	{ "sh_fsi2",	(kernel_ulong_t)&fsi2_core },
 	{},
 };
 MODULE_DEVICE_TABLE(platform, fsi_id_table);
@@ -1982,7 +1974,6 @@ static int fsi_probe(struct platform_device *pdev)
 	/* FSI A setting */
 	fsi		= &master->fsia;
 	fsi->base	= master->base;
-	fsi->phys	= res->start;
 	fsi->master	= master;
 	fsi_port_info_init(fsi, &info.port_a);
 	fsi_handler_init(fsi, &info.port_a);
@@ -1995,7 +1986,6 @@ static int fsi_probe(struct platform_device *pdev)
 	/* FSI B setting */
 	fsi		= &master->fsib;
 	fsi->base	= master->base + 0x40;
-	fsi->phys	= res->start + 0x40;
 	fsi->master	= master;
 	fsi_port_info_init(fsi, &info.port_b);
 	fsi_handler_init(fsi, &info.port_b);

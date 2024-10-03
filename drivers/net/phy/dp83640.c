@@ -20,7 +20,6 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
-#include <linux/crc32.h>
 #include <linux/ethtool.h>
 #include <linux/kernel.h>
 #include <linux/list.h>
@@ -37,6 +36,8 @@
 
 #define DP83640_PHY_ID	0x20005ce1
 #define PAGESEL		0x13
+#define LAYER4		0x02
+#define LAYER2		0x01
 #define MAX_RXTS	64
 #define N_EXT_TS	6
 #define N_PER_OUT	7
@@ -46,7 +47,7 @@
 #define PSF_TX		0x1000
 #define EXT_EVENT	1
 #define CAL_EVENT	7
-#define CAL_TRIGGER	1
+#define CAL_TRIGGER	7
 #define DP83640_N_PINS	12
 
 #define MII_DP83640_MICR 0x11
@@ -66,8 +67,6 @@
 
 /* phyter seems to miss the mark by 16 ns */
 #define ADJTIME_FIX	16
-
-#define SKB_TIMESTAMP_TIMEOUT	2 /* jiffies */
 
 #if defined(__BIG_ENDIAN)
 #define ENDIAN_FLAG	0
@@ -111,7 +110,7 @@ struct dp83640_private {
 	struct list_head list;
 	struct dp83640_clock *clock;
 	struct phy_device *phydev;
-	struct delayed_work ts_work;
+	struct work_struct ts_work;
 	int hwts_tx_en;
 	int hwts_rx_en;
 	int layer;
@@ -220,10 +219,9 @@ static void rx_timestamp_work(struct work_struct *work);
 
 #define BROADCAST_ADDR 31
 
-static inline int broadcast_write(struct phy_device *phydev, u32 regnum,
-				  u16 val)
+static inline int broadcast_write(struct mii_bus *bus, u32 regnum, u16 val)
 {
-	return mdiobus_write(phydev->mdio.bus, BROADCAST_ADDR, regnum, val);
+	return mdiobus_write(bus, BROADCAST_ADDR, regnum, val);
 }
 
 /* Caller must hold extreg_lock. */
@@ -233,7 +231,7 @@ static int ext_read(struct phy_device *phydev, int page, u32 regnum)
 	int val;
 
 	if (dp83640->clock->page != page) {
-		broadcast_write(phydev, PAGESEL, page);
+		broadcast_write(phydev->bus, PAGESEL, page);
 		dp83640->clock->page = page;
 	}
 	val = phy_read(phydev, regnum);
@@ -248,11 +246,11 @@ static void ext_write(int broadcast, struct phy_device *phydev,
 	struct dp83640_private *dp83640 = phydev->priv;
 
 	if (dp83640->clock->page != page) {
-		broadcast_write(phydev, PAGESEL, page);
+		broadcast_write(phydev->bus, PAGESEL, page);
 		dp83640->clock->page = page;
 	}
 	if (broadcast)
-		broadcast_write(phydev, regnum, val);
+		broadcast_write(phydev->bus, regnum, val);
 	else
 		phy_write(phydev, regnum, val);
 }
@@ -286,7 +284,7 @@ static void phy2rxts(struct phy_rxts *p, struct rxts *rxts)
 	rxts->seqid = p->seqid;
 	rxts->msgtype = (p->msgtype >> 12) & 0xf;
 	rxts->hash = p->msgtype & 0x0fff;
-	rxts->tmo = jiffies + SKB_TIMESTAMP_TIMEOUT;
+	rxts->tmo = jiffies + 2;
 }
 
 static u64 phy2txts(struct phy_txts *p)
@@ -498,9 +496,7 @@ static int ptp_dp83640_enable(struct ptp_clock_info *ptp,
 			else
 				evnt |= EVNT_RISE;
 		}
-		mutex_lock(&clock->extreg_lock);
 		ext_write(0, phydev, PAGE5, PTP_EVNT, evnt);
-		mutex_unlock(&clock->extreg_lock);
 		return 0;
 
 	case PTP_CLK_REQ_PEROUT:
@@ -536,8 +532,6 @@ static u8 status_frame_src[6] = { 0x08, 0x00, 0x17, 0x0B, 0x6B, 0x0F };
 
 static void enable_status_frames(struct phy_device *phydev, bool on)
 {
-	struct dp83640_private *dp83640 = phydev->priv;
-	struct dp83640_clock *clock = dp83640->clock;
 	u16 cfg0 = 0, ver;
 
 	if (on)
@@ -545,12 +539,8 @@ static void enable_status_frames(struct phy_device *phydev, bool on)
 
 	ver = (PSF_PTPVER & VERSIONPTP_MASK) << VERSIONPTP_SHIFT;
 
-	mutex_lock(&clock->extreg_lock);
-
 	ext_write(0, phydev, PAGE5, PSF_CFG0, cfg0);
 	ext_write(0, phydev, PAGE6, PSF_CFG1, ver);
-
-	mutex_unlock(&clock->extreg_lock);
 
 	if (!phydev->attached_dev) {
 		pr_warn("expected to find an attached netdevice\n");
@@ -789,12 +779,9 @@ static int decode_evnt(struct dp83640_private *dp83640,
 	return parsed;
 }
 
-#define DP83640_PACKET_HASH_OFFSET	20
-#define DP83640_PACKET_HASH_LEN		10
-
 static int match(struct sk_buff *skb, unsigned int type, struct rxts *rxts)
 {
-	u16 *seqid, hash;
+	u16 *seqid;
 	unsigned int offset = 0;
 	u8 *msgtype, *data = skb_mac_header(skb);
 
@@ -824,19 +811,11 @@ static int match(struct sk_buff *skb, unsigned int type, struct rxts *rxts)
 		msgtype = data + offset + OFF_PTP_CONTROL;
 	else
 		msgtype = data + offset;
-	if (rxts->msgtype != (*msgtype & 0xf))
-		return 0;
 
 	seqid = (u16 *)(data + offset + OFF_PTP_SEQUENCE_ID);
-	if (rxts->seqid != ntohs(*seqid))
-		return 0;
 
-	hash = ether_crc(DP83640_PACKET_HASH_LEN,
-			 data + offset + DP83640_PACKET_HASH_OFFSET) >> 20;
-	if (rxts->hash != hash)
-		return 0;
-
-	return 1;
+	return rxts->msgtype == (*msgtype & 0xf) &&
+		rxts->seqid   == ntohs(*seqid);
 }
 
 static void decode_rxts(struct dp83640_private *dp83640,
@@ -846,11 +825,6 @@ static void decode_rxts(struct dp83640_private *dp83640,
 	struct skb_shared_hwtstamps *shhwtstamps = NULL;
 	struct sk_buff *skb;
 	unsigned long flags;
-	u8 overflow;
-
-	overflow = (phy_rxts->ns_hi >> 14) & 0x3;
-	if (overflow)
-		pr_debug("rx timestamp queue overflow, count %d\n", overflow);
 
 	spin_lock_irqsave(&dp83640->rx_lock, flags);
 
@@ -864,7 +838,7 @@ static void decode_rxts(struct dp83640_private *dp83640,
 	list_del_init(&rxts->list);
 	phy2rxts(phy_rxts, rxts);
 
-	spin_lock(&dp83640->rx_queue.lock);
+	spin_lock_irqsave(&dp83640->rx_queue.lock, flags);
 	skb_queue_walk(&dp83640->rx_queue, skb) {
 		struct dp83640_skb_info *skb_info;
 
@@ -879,7 +853,7 @@ static void decode_rxts(struct dp83640_private *dp83640,
 			break;
 		}
 	}
-	spin_unlock(&dp83640->rx_queue.lock);
+	spin_unlock_irqrestore(&dp83640->rx_queue.lock, flags);
 
 	if (!shhwtstamps)
 		list_add_tail(&rxts->list, &dp83640->rxts);
@@ -893,7 +867,6 @@ static void decode_txts(struct dp83640_private *dp83640,
 	struct skb_shared_hwtstamps shhwtstamps;
 	struct sk_buff *skb;
 	u64 ns;
-	u8 overflow;
 
 	/* We must already have the skb that triggered this. */
 
@@ -903,17 +876,6 @@ static void decode_txts(struct dp83640_private *dp83640,
 		pr_debug("have timestamp but tx_queue empty\n");
 		return;
 	}
-
-	overflow = (phy_txts->ns_hi >> 14) & 0x3;
-	if (overflow) {
-		pr_debug("tx timestamp queue overflow, count %d\n", overflow);
-		while (skb) {
-			skb_complete_tx_timestamp(skb, NULL);
-			skb = skb_dequeue(&dp83640->tx_queue);
-		}
-		return;
-	}
-
 	ns = phy2txts(phy_txts);
 	memset(&shhwtstamps, 0, sizeof(shhwtstamps));
 	shhwtstamps.hwtstamp = ns_to_ktime(ns);
@@ -1057,7 +1019,7 @@ static int choose_this_phy(struct dp83640_clock *clock,
 	if (chosen_phy == -1 && !clock->chosen)
 		return 1;
 
-	if (chosen_phy == phydev->mdio.addr)
+	if (chosen_phy == phydev->addr)
 		return 1;
 
 	return 0;
@@ -1121,10 +1083,10 @@ static int dp83640_probe(struct phy_device *phydev)
 	struct dp83640_private *dp83640;
 	int err = -ENOMEM, i;
 
-	if (phydev->mdio.addr == BROADCAST_ADDR)
+	if (phydev->addr == BROADCAST_ADDR)
 		return 0;
 
-	clock = dp83640_clock_get_bus(phydev->mdio.bus);
+	clock = dp83640_clock_get_bus(phydev->bus);
 	if (!clock)
 		goto no_clock;
 
@@ -1133,7 +1095,7 @@ static int dp83640_probe(struct phy_device *phydev)
 		goto no_memory;
 
 	dp83640->phydev = phydev;
-	INIT_DELAYED_WORK(&dp83640->ts_work, rx_timestamp_work);
+	INIT_WORK(&dp83640->ts_work, rx_timestamp_work);
 
 	INIT_LIST_HEAD(&dp83640->rxts);
 	INIT_LIST_HEAD(&dp83640->rxpool);
@@ -1150,8 +1112,7 @@ static int dp83640_probe(struct phy_device *phydev)
 
 	if (choose_this_phy(clock, phydev)) {
 		clock->chosen = dp83640;
-		clock->ptp_clock = ptp_clock_register(&clock->caps,
-						      &phydev->mdio.dev);
+		clock->ptp_clock = ptp_clock_register(&clock->caps, &phydev->dev);
 		if (IS_ERR(clock->ptp_clock)) {
 			err = PTR_ERR(clock->ptp_clock);
 			goto no_register;
@@ -1177,11 +1138,11 @@ static void dp83640_remove(struct phy_device *phydev)
 	struct list_head *this, *next;
 	struct dp83640_private *tmp, *dp83640 = phydev->priv;
 
-	if (phydev->mdio.addr == BROADCAST_ADDR)
+	if (phydev->addr == BROADCAST_ADDR)
 		return;
 
 	enable_status_frames(phydev, false);
-	cancel_delayed_work_sync(&dp83640->ts_work);
+	cancel_work_sync(&dp83640->ts_work);
 
 	skb_queue_purge(&dp83640->rx_queue);
 	skb_queue_purge(&dp83640->tx_queue);
@@ -1212,18 +1173,11 @@ static int dp83640_config_init(struct phy_device *phydev)
 
 	if (clock->chosen && !list_empty(&clock->phylist))
 		recalibrate(clock);
-	else {
-		mutex_lock(&clock->extreg_lock);
+	else
 		enable_broadcast(phydev, clock->page, 1);
-		mutex_unlock(&clock->extreg_lock);
-	}
 
 	enable_status_frames(phydev, true);
-
-	mutex_lock(&clock->extreg_lock);
 	ext_write(0, phydev, PAGE4, PTP_CTL, PTP_ENABLE);
-	mutex_unlock(&clock->extreg_lock);
-
 	return 0;
 }
 
@@ -1313,29 +1267,29 @@ static int dp83640_hwtstamp(struct phy_device *phydev, struct ifreq *ifr)
 	case HWTSTAMP_FILTER_PTP_V1_L4_SYNC:
 	case HWTSTAMP_FILTER_PTP_V1_L4_DELAY_REQ:
 		dp83640->hwts_rx_en = 1;
-		dp83640->layer = PTP_CLASS_L4;
-		dp83640->version = PTP_CLASS_V1;
+		dp83640->layer = LAYER4;
+		dp83640->version = 1;
 		break;
 	case HWTSTAMP_FILTER_PTP_V2_L4_EVENT:
 	case HWTSTAMP_FILTER_PTP_V2_L4_SYNC:
 	case HWTSTAMP_FILTER_PTP_V2_L4_DELAY_REQ:
 		dp83640->hwts_rx_en = 1;
-		dp83640->layer = PTP_CLASS_L4;
-		dp83640->version = PTP_CLASS_V2;
+		dp83640->layer = LAYER4;
+		dp83640->version = 2;
 		break;
 	case HWTSTAMP_FILTER_PTP_V2_L2_EVENT:
 	case HWTSTAMP_FILTER_PTP_V2_L2_SYNC:
 	case HWTSTAMP_FILTER_PTP_V2_L2_DELAY_REQ:
 		dp83640->hwts_rx_en = 1;
-		dp83640->layer = PTP_CLASS_L2;
-		dp83640->version = PTP_CLASS_V2;
+		dp83640->layer = LAYER2;
+		dp83640->version = 2;
 		break;
 	case HWTSTAMP_FILTER_PTP_V2_EVENT:
 	case HWTSTAMP_FILTER_PTP_V2_SYNC:
 	case HWTSTAMP_FILTER_PTP_V2_DELAY_REQ:
 		dp83640->hwts_rx_en = 1;
-		dp83640->layer = PTP_CLASS_L4 | PTP_CLASS_L2;
-		dp83640->version = PTP_CLASS_V2;
+		dp83640->layer = LAYER4|LAYER2;
+		dp83640->version = 2;
 		break;
 	default:
 		return -ERANGE;
@@ -1344,11 +1298,11 @@ static int dp83640_hwtstamp(struct phy_device *phydev, struct ifreq *ifr)
 	txcfg0 = (dp83640->version & TX_PTP_VER_MASK) << TX_PTP_VER_SHIFT;
 	rxcfg0 = (dp83640->version & TX_PTP_VER_MASK) << TX_PTP_VER_SHIFT;
 
-	if (dp83640->layer & PTP_CLASS_L2) {
+	if (dp83640->layer & LAYER2) {
 		txcfg0 |= TX_L2_EN;
 		rxcfg0 |= RX_L2_EN;
 	}
-	if (dp83640->layer & PTP_CLASS_L4) {
+	if (dp83640->layer & LAYER4) {
 		txcfg0 |= TX_IPV6_EN | TX_IPV4_EN;
 		rxcfg0 |= RX_IPV6_EN | RX_IPV4_EN;
 	}
@@ -1375,7 +1329,7 @@ static int dp83640_hwtstamp(struct phy_device *phydev, struct ifreq *ifr)
 static void rx_timestamp_work(struct work_struct *work)
 {
 	struct dp83640_private *dp83640 =
-		container_of(work, struct dp83640_private, ts_work.work);
+		container_of(work, struct dp83640_private, ts_work);
 	struct sk_buff *skb;
 
 	/* Deliver expired packets. */
@@ -1392,7 +1346,7 @@ static void rx_timestamp_work(struct work_struct *work)
 	}
 
 	if (!skb_queue_empty(&dp83640->rx_queue))
-		schedule_delayed_work(&dp83640->ts_work, SKB_TIMESTAMP_TIMEOUT);
+		schedule_work(&dp83640->ts_work);
 }
 
 static bool dp83640_rxtstamp(struct phy_device *phydev,
@@ -1414,11 +1368,7 @@ static bool dp83640_rxtstamp(struct phy_device *phydev,
 	if (!dp83640->hwts_rx_en)
 		return false;
 
-	if ((type & dp83640->version) == 0 || (type & dp83640->layer) == 0)
-		return false;
-
 	spin_lock_irqsave(&dp83640->rx_lock, flags);
-	prune_rx_ts(dp83640);
 	list_for_each_safe(this, next, &dp83640->rxts) {
 		rxts = list_entry(this, struct rxts, list);
 		if (match(skb, type, rxts)) {
@@ -1435,11 +1385,9 @@ static bool dp83640_rxtstamp(struct phy_device *phydev,
 
 	if (!shhwtstamps) {
 		skb_info->ptp_type = type;
-		skb_info->tmo = jiffies + SKB_TIMESTAMP_TIMEOUT;
+		skb_info->tmo = jiffies + 2;
 		skb_queue_tail(&dp83640->rx_queue, skb);
-		schedule_delayed_work(&dp83640->ts_work, SKB_TIMESTAMP_TIMEOUT);
-	} else {
-		netif_rx_ni(skb);
+		schedule_work(&dp83640->ts_work);
 	}
 
 	return true;
@@ -1486,9 +1434,17 @@ static int dp83640_ts_info(struct phy_device *dev, struct ethtool_ts_info *info)
 	info->rx_filters =
 		(1 << HWTSTAMP_FILTER_NONE) |
 		(1 << HWTSTAMP_FILTER_PTP_V1_L4_EVENT) |
+		(1 << HWTSTAMP_FILTER_PTP_V1_L4_SYNC) |
+		(1 << HWTSTAMP_FILTER_PTP_V1_L4_DELAY_REQ) |
 		(1 << HWTSTAMP_FILTER_PTP_V2_L4_EVENT) |
+		(1 << HWTSTAMP_FILTER_PTP_V2_L4_SYNC) |
+		(1 << HWTSTAMP_FILTER_PTP_V2_L4_DELAY_REQ) |
 		(1 << HWTSTAMP_FILTER_PTP_V2_L2_EVENT) |
-		(1 << HWTSTAMP_FILTER_PTP_V2_EVENT);
+		(1 << HWTSTAMP_FILTER_PTP_V2_L2_SYNC) |
+		(1 << HWTSTAMP_FILTER_PTP_V2_L2_DELAY_REQ) |
+		(1 << HWTSTAMP_FILTER_PTP_V2_EVENT) |
+		(1 << HWTSTAMP_FILTER_PTP_V2_SYNC) |
+		(1 << HWTSTAMP_FILTER_PTP_V2_DELAY_REQ);
 	return 0;
 }
 
@@ -1509,11 +1465,12 @@ static struct phy_driver dp83640_driver = {
 	.hwtstamp	= dp83640_hwtstamp,
 	.rxtstamp	= dp83640_rxtstamp,
 	.txtstamp	= dp83640_txtstamp,
+	.driver		= {.owner = THIS_MODULE,}
 };
 
 static int __init dp83640_init(void)
 {
-	return phy_driver_register(&dp83640_driver, THIS_MODULE);
+	return phy_driver_register(&dp83640_driver);
 }
 
 static void __exit dp83640_exit(void)

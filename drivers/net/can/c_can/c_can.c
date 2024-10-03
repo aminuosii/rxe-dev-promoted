@@ -592,7 +592,6 @@ static int c_can_start(struct net_device *dev)
 {
 	struct c_can_priv *priv = netdev_priv(dev);
 	int err;
-	struct pinctrl *p;
 
 	/* basic c_can configuration */
 	err = c_can_chip_config(dev);
@@ -605,13 +604,8 @@ static int c_can_start(struct net_device *dev)
 
 	priv->can.state = CAN_STATE_ERROR_ACTIVE;
 
-	/* Attempt to use "active" if available else use "default" */
-	p = pinctrl_get_select(priv->device, "active");
-	if (!IS_ERR(p))
-		pinctrl_put(p);
-	else
-		pinctrl_pm_select_default_state(priv->device);
-
+	/* activate pins */
+	pinctrl_pm_select_default_state(dev->dev.parent);
 	return 0;
 }
 
@@ -962,6 +956,7 @@ static int c_can_handle_bus_err(struct net_device *dev,
 	 * type of the last error to occur on the CAN bus
 	 */
 	cf->can_id |= CAN_ERR_PROT | CAN_ERR_BUSERROR;
+	cf->data[2] |= CAN_ERR_PROT_UNSPEC;
 
 	switch (lec_type) {
 	case LEC_STUFF_ERROR:
@@ -974,7 +969,8 @@ static int c_can_handle_bus_err(struct net_device *dev,
 		break;
 	case LEC_ACK_ERROR:
 		netdev_dbg(dev, "ack error\n");
-		cf->data[3] = CAN_ERR_PROT_LOC_ACK;
+		cf->data[3] |= (CAN_ERR_PROT_LOC_ACK |
+				CAN_ERR_PROT_LOC_ACK_DEL);
 		break;
 	case LEC_BIT1_ERROR:
 		netdev_dbg(dev, "bit1 error\n");
@@ -986,7 +982,8 @@ static int c_can_handle_bus_err(struct net_device *dev,
 		break;
 	case LEC_CRC_ERROR:
 		netdev_dbg(dev, "CRC error\n");
-		cf->data[3] = CAN_ERR_PROT_LOC_CRC_SEQ;
+		cf->data[3] |= (CAN_ERR_PROT_LOC_CRC_SEQ |
+				CAN_ERR_PROT_LOC_CRC_DEL);
 		break;
 	default:
 		break;

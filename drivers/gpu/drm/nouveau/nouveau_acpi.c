@@ -6,7 +6,7 @@
 #include <drm/drm_edid.h>
 #include <acpi/video.h>
 
-#include "nouveau_drv.h"
+#include "nouveau_drm.h"
 #include "nouveau_acpi.h"
 
 #define NOUVEAU_DSM_LED 0x02
@@ -206,7 +206,7 @@ static int nouveau_dsm_get_client_id(struct pci_dev *pdev)
 	return VGA_SWITCHEROO_DIS;
 }
 
-static const struct vga_switcheroo_handler nouveau_dsm_handler = {
+static struct vga_switcheroo_handler nouveau_dsm_handler = {
 	.switchto = nouveau_dsm_switchto,
 	.power_state = nouveau_dsm_power_state,
 	.get_client_id = nouveau_dsm_get_client_id,
@@ -314,7 +314,7 @@ void nouveau_register_dsm_handler(void)
 	if (!r)
 		return;
 
-	vga_switcheroo_register_handler(&nouveau_dsm_handler, 0);
+	vga_switcheroo_register_handler(&nouveau_dsm_handler);
 }
 
 /* Must be called for Optimus models before the card can be turned off */
@@ -367,18 +367,17 @@ static int nouveau_rom_call(acpi_handle rom_handle, uint8_t *bios,
 		return -ENODEV;
 	}
 	obj = (union acpi_object *)buffer.pointer;
-	len = min(len, (int)obj->buffer.length);
 	memcpy(bios+offset, obj->buffer.pointer, len);
 	kfree(buffer.pointer);
 	return len;
 }
 
-bool nouveau_acpi_rom_supported(struct device *dev)
+bool nouveau_acpi_rom_supported(struct pci_dev *pdev)
 {
 	acpi_status status;
 	acpi_handle dhandle, rom_handle;
 
-	dhandle = ACPI_HANDLE(dev);
+	dhandle = ACPI_HANDLE(&pdev->dev);
 	if (!dhandle)
 		return false;
 

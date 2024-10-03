@@ -361,7 +361,7 @@ static int ext4_ext_swap_inode_data(handle_t *handle, struct inode *inode,
 	 * blocks.
 	 *
 	 * While converting to extents we need not
-	 * update the original inode i_blocks for extent blocks
+	 * update the orignal inode i_blocks for extent blocks
 	 * via quota APIs. The quota update happened via tmp_inode already.
 	 */
 	spin_lock(&inode->i_lock);
@@ -448,7 +448,8 @@ int ext4_ext_migrate(struct inode *inode)
 	 * If the filesystem does not support extents, or the inode
 	 * already is extent-based, error out.
 	 */
-	if (!ext4_has_feature_extents(inode->i_sb) ||
+	if (!EXT4_HAS_INCOMPAT_FEATURE(inode->i_sb,
+				       EXT4_FEATURE_INCOMPAT_EXTENTS) ||
 	    (ext4_test_inode_flag(inode, EXT4_INODE_EXTENTS)))
 		return -EINVAL;
 
@@ -474,7 +475,7 @@ int ext4_ext_migrate(struct inode *inode)
 		EXT4_INODES_PER_GROUP(inode->i_sb)) + 1;
 	owner[0] = i_uid_read(inode);
 	owner[1] = i_gid_read(inode);
-	tmp_inode = ext4_new_inode(handle, d_inode(inode->i_sb->s_root),
+	tmp_inode = ext4_new_inode(handle, inode->i_sb->s_root->d_inode,
 				   S_IFREG, NULL, goal, owner);
 	if (IS_ERR(tmp_inode)) {
 		retval = PTR_ERR(tmp_inode);
@@ -619,25 +620,18 @@ int ext4_ind_migrate(struct inode *inode)
 	struct ext4_inode_info		*ei = EXT4_I(inode);
 	struct ext4_extent		*ex;
 	unsigned int			i, len;
-	ext4_lblk_t			start, end;
 	ext4_fsblk_t			blk;
 	handle_t			*handle;
 	int				ret;
 
-	if (!ext4_has_feature_extents(inode->i_sb) ||
+	if (!EXT4_HAS_INCOMPAT_FEATURE(inode->i_sb,
+				       EXT4_FEATURE_INCOMPAT_EXTENTS) ||
 	    (!ext4_test_inode_flag(inode, EXT4_INODE_EXTENTS)))
 		return -EINVAL;
 
-	if (ext4_has_feature_bigalloc(inode->i_sb))
+	if (EXT4_HAS_RO_COMPAT_FEATURE(inode->i_sb,
+				       EXT4_FEATURE_RO_COMPAT_BIGALLOC))
 		return -EOPNOTSUPP;
-
-	/*
-	 * In order to get correct extent info, force all delayed allocation
-	 * blocks to be allocated, otherwise delayed allocation blocks may not
-	 * be reflected and bypass the checks on extent header.
-	 */
-	if (test_opt(inode->i_sb, DELALLOC))
-		ext4_alloc_da_blocks(inode);
 
 	handle = ext4_journal_start(inode, EXT4_HT_MIGRATE, 1);
 	if (IS_ERR(handle))
@@ -656,13 +650,11 @@ int ext4_ind_migrate(struct inode *inode)
 		goto errout;
 	}
 	if (eh->eh_entries == 0)
-		blk = len = start = end = 0;
+		blk = len = 0;
 	else {
 		len = le16_to_cpu(ex->ee_len);
 		blk = ext4_ext_pblock(ex);
-		start = le32_to_cpu(ex->ee_block);
-		end = start + len - 1;
-		if (end >= EXT4_NDIR_BLOCKS) {
+		if (len > EXT4_NDIR_BLOCKS) {
 			ret = -EOPNOTSUPP;
 			goto errout;
 		}
@@ -670,7 +662,7 @@ int ext4_ind_migrate(struct inode *inode)
 
 	ext4_clear_inode_flag(inode, EXT4_INODE_EXTENTS);
 	memset(ei->i_data, 0, sizeof(ei->i_data));
-	for (i = start; i <= end; i++)
+	for (i=0; i < len; i++)
 		ei->i_data[i] = cpu_to_le32(blk++);
 	ext4_mark_inode_dirty(handle, inode);
 errout:

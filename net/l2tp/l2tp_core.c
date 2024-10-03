@@ -1319,7 +1319,7 @@ static void l2tp_tunnel_del_work(struct work_struct *work)
 	tunnel = container_of(work, struct l2tp_tunnel, del_work);
 	sk = l2tp_tunnel_sock_lookup(tunnel);
 	if (!sk)
-		goto out;
+		return;
 
 	sock = sk->sk_socket;
 
@@ -1334,15 +1334,12 @@ static void l2tp_tunnel_del_work(struct work_struct *work)
 		if (sock)
 			inet_shutdown(sock, 2);
 	} else {
-		if (sock) {
+		if (sock)
 			kernel_sock_shutdown(sock, SHUT_RDWR);
-			sock_release(sock);
-		}
+		sk_release_kernel(sk);
 	}
 
 	l2tp_tunnel_sock_put(sk);
-out:
-	l2tp_tunnel_dec_refcount(tunnel);
 }
 
 /* Create a socket for the tunnel, if one isn't set up by
@@ -1376,9 +1373,9 @@ static int l2tp_tunnel_sock_create(struct net *net,
 			memcpy(&udp_conf.peer_ip6, cfg->peer_ip6,
 			       sizeof(udp_conf.peer_ip6));
 			udp_conf.use_udp6_tx_checksums =
-			  ! cfg->udp6_zero_tx_checksums;
+			    cfg->udp6_zero_tx_checksums;
 			udp_conf.use_udp6_rx_checksums =
-			  ! cfg->udp6_zero_rx_checksums;
+			    cfg->udp6_zero_rx_checksums;
 		} else
 #endif
 		{
@@ -1402,10 +1399,12 @@ static int l2tp_tunnel_sock_create(struct net *net,
 		if (cfg->local_ip6 && cfg->peer_ip6) {
 			struct sockaddr_l2tpip6 ip6_addr = {0};
 
-			err = sock_create_kern(net, AF_INET6, SOCK_DGRAM,
+			err = sock_create_kern(AF_INET6, SOCK_DGRAM,
 					  IPPROTO_L2TP, &sock);
 			if (err < 0)
 				goto out;
+
+			sk_change_net(sock->sk, net);
 
 			ip6_addr.l2tp_family = AF_INET6;
 			memcpy(&ip6_addr.l2tp_addr, cfg->local_ip6,
@@ -1430,10 +1429,12 @@ static int l2tp_tunnel_sock_create(struct net *net,
 		{
 			struct sockaddr_l2tpip ip_addr = {0};
 
-			err = sock_create_kern(net, AF_INET, SOCK_DGRAM,
+			err = sock_create_kern(AF_INET, SOCK_DGRAM,
 					  IPPROTO_L2TP, &sock);
 			if (err < 0)
 				goto out;
+
+			sk_change_net(sock->sk, net);
 
 			ip_addr.l2tp_family = AF_INET;
 			ip_addr.l2tp_addr = cfg->local_ip;
@@ -1461,7 +1462,7 @@ out:
 	*sockp = sock;
 	if ((err < 0) && sock) {
 		kernel_sock_shutdown(sock, SHUT_RDWR);
-		sock_release(sock);
+		sk_release_kernel(sock->sk);
 		*sockp = NULL;
 	}
 
@@ -1581,7 +1582,7 @@ int l2tp_tunnel_create(struct net *net, int fd, int version, u32 tunnel_id, u32 
 	/* Mark socket as an encapsulation socket. See net/ipv4/udp.c */
 	tunnel->encap = encap;
 	if (encap == L2TP_ENCAPTYPE_UDP) {
-		struct udp_tunnel_sock_cfg udp_cfg = { };
+		struct udp_tunnel_sock_cfg udp_cfg;
 
 		udp_cfg.sk_user_data = tunnel;
 		udp_cfg.encap_type = UDP_ENCAP_L2TPINUDP;
@@ -1638,13 +1639,8 @@ EXPORT_SYMBOL_GPL(l2tp_tunnel_create);
  */
 int l2tp_tunnel_delete(struct l2tp_tunnel *tunnel)
 {
-	l2tp_tunnel_inc_refcount(tunnel);
 	l2tp_tunnel_closeall(tunnel);
-	if (false == queue_work(l2tp_wq, &tunnel->del_work)) {
-		l2tp_tunnel_dec_refcount(tunnel);
-		return 1;
-	}
-	return 0;
+	return (false == queue_work(l2tp_wq, &tunnel->del_work));
 }
 EXPORT_SYMBOL_GPL(l2tp_tunnel_delete);
 

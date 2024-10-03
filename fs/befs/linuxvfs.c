@@ -42,7 +42,8 @@ static struct inode *befs_iget(struct super_block *, unsigned long);
 static struct inode *befs_alloc_inode(struct super_block *sb);
 static void befs_destroy_inode(struct inode *inode);
 static void befs_destroy_inodecache(void);
-static int befs_symlink_readpage(struct file *, struct page *);
+static void *befs_follow_link(struct dentry *, struct nameidata *);
+static void *befs_fast_follow_link(struct dentry *, struct nameidata *);
 static int befs_utf2nls(struct super_block *sb, const char *in, int in_len,
 			char **out, int *out_len);
 static int befs_nls2utf(struct super_block *sb, const char *in, int in_len,
@@ -66,7 +67,7 @@ static struct kmem_cache *befs_inode_cachep;
 
 static const struct file_operations befs_dir_operations = {
 	.read		= generic_read_dir,
-	.iterate_shared	= befs_readdir,
+	.iterate	= befs_readdir,
 	.llseek		= generic_file_llseek,
 };
 
@@ -79,8 +80,15 @@ static const struct address_space_operations befs_aops = {
 	.bmap		= befs_bmap,
 };
 
-static const struct address_space_operations befs_symlink_aops = {
-	.readpage	= befs_symlink_readpage,
+static const struct inode_operations befs_fast_symlink_inode_operations = {
+	.readlink	= generic_readlink,
+	.follow_link	= befs_fast_follow_link,
+};
+
+static const struct inode_operations befs_symlink_inode_operations = {
+	.readlink	= generic_readlink,
+	.follow_link	= befs_follow_link,
+	.put_link	= kfree_put_link,
 };
 
 /* 
@@ -155,9 +163,9 @@ befs_get_block(struct inode *inode, sector_t block,
 static struct dentry *
 befs_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags)
 {
-	struct inode *inode;
+	struct inode *inode = NULL;
 	struct super_block *sb = dir->i_sb;
-	const befs_data_stream *ds = &BEFS_I(dir)->i_data.ds;
+	befs_data_stream *ds = &BEFS_I(dir)->i_data.ds;
 	befs_off_t offset;
 	int ret;
 	int utfnamelen;
@@ -207,7 +215,7 @@ befs_readdir(struct file *file, struct dir_context *ctx)
 {
 	struct inode *inode = file_inode(file);
 	struct super_block *sb = inode->i_sb;
-	const befs_data_stream *ds = &BEFS_I(inode)->i_data.ds;
+	befs_data_stream *ds = &BEFS_I(inode)->i_data.ds;
 	befs_off_t value;
 	int result;
 	size_t keysize;
@@ -294,10 +302,10 @@ static void init_once(void *foo)
 
 static struct inode *befs_iget(struct super_block *sb, unsigned long ino)
 {
-	struct buffer_head *bh;
-	befs_inode *raw_inode;
+	struct buffer_head *bh = NULL;
+	befs_inode *raw_inode = NULL;
 	struct befs_sb_info *befs_sb = BEFS_SB(sb);
-	struct befs_inode_info *befs_ino;
+	struct befs_inode_info *befs_ino = NULL;
 	struct inode *inode;
 	long ret = -EIO;
 
@@ -395,14 +403,10 @@ static struct inode *befs_iget(struct super_block *sb, unsigned long ino)
 		inode->i_op = &befs_dir_inode_operations;
 		inode->i_fop = &befs_dir_operations;
 	} else if (S_ISLNK(inode->i_mode)) {
-		if (befs_ino->i_flags & BEFS_LONG_SYMLINK) {
-			inode->i_op = &page_symlink_inode_operations;
-			inode_nohighmem(inode);
-			inode->i_mapping->a_ops = &befs_symlink_aops;
-		} else {
-			inode->i_link = befs_ino->i_data.symlink;
-			inode->i_op = &simple_symlink_inode_operations;
-		}
+		if (befs_ino->i_flags & BEFS_LONG_SYMLINK)
+			inode->i_op = &befs_symlink_inode_operations;
+		else
+			inode->i_op = &befs_fast_symlink_inode_operations;
 	} else {
 		befs_error(sb, "Inode %lu is not a regular file, "
 			   "directory or symlink. THAT IS WRONG! BeFS has no "
@@ -434,7 +438,7 @@ befs_init_inodecache(void)
 	befs_inode_cachep = kmem_cache_create("befs_inode_cache",
 					      sizeof (struct befs_inode_info),
 					      0, (SLAB_RECLAIM_ACCOUNT|
-						SLAB_MEM_SPREAD|SLAB_ACCOUNT),
+						SLAB_MEM_SPREAD),
 					      init_once);
 	if (befs_inode_cachep == NULL) {
 		pr_err("%s: Couldn't initialize inode slabcache\n", __func__);
@@ -463,33 +467,44 @@ befs_destroy_inodecache(void)
  * The data stream become link name. Unless the LONG_SYMLINK
  * flag is set.
  */
-static int befs_symlink_readpage(struct file *unused, struct page *page)
+static void *
+befs_follow_link(struct dentry *dentry, struct nameidata *nd)
 {
-	struct inode *inode = page->mapping->host;
-	struct super_block *sb = inode->i_sb;
-	struct befs_inode_info *befs_ino = BEFS_I(inode);
+	struct super_block *sb = dentry->d_sb;
+	struct befs_inode_info *befs_ino = BEFS_I(dentry->d_inode);
 	befs_data_stream *data = &befs_ino->i_data.ds;
 	befs_off_t len = data->size;
-	char *link = page_address(page);
+	char *link;
 
-	if (len == 0 || len > PAGE_SIZE) {
+	if (len == 0) {
 		befs_error(sb, "Long symlink with illegal length");
-		goto fail;
-	}
-	befs_debug(sb, "Follow long symlink");
+		link = ERR_PTR(-EIO);
+	} else {
+		befs_debug(sb, "Follow long symlink");
 
-	if (befs_read_lsymlink(sb, data, link, len) != len) {
-		befs_error(sb, "Failed to read entire long symlink");
-		goto fail;
+		link = kmalloc(len, GFP_NOFS);
+		if (!link) {
+			link = ERR_PTR(-ENOMEM);
+		} else if (befs_read_lsymlink(sb, data, link, len) != len) {
+			kfree(link);
+			befs_error(sb, "Failed to read entire long symlink");
+			link = ERR_PTR(-EIO);
+		} else {
+			link[len - 1] = '\0';
+		}
 	}
-	link[len - 1] = '\0';
-	SetPageUptodate(page);
-	unlock_page(page);
-	return 0;
-fail:
-	SetPageError(page);
-	unlock_page(page);
-	return -EIO;
+	nd_set_link(nd, link);
+	return NULL;
+}
+
+
+static void *
+befs_fast_follow_link(struct dentry *dentry, struct nameidata *nd)
+{
+	struct befs_inode_info *befs_ino = BEFS_I(dentry->d_inode);
+
+	nd_set_link(nd, befs_ino->i_data.symlink);
+	return NULL;
 }
 
 /*

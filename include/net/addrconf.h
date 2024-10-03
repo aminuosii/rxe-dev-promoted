@@ -87,10 +87,7 @@ int __ipv6_get_lladdr(struct inet6_dev *idev, struct in6_addr *addr,
 		      u32 banned_flags);
 int ipv6_get_lladdr(struct net_device *dev, struct in6_addr *addr,
 		    u32 banned_flags);
-int ipv4_rcv_saddr_equal(const struct sock *sk, const struct sock *sk2,
-			 bool match_wildcard);
-int ipv6_rcv_saddr_equal(const struct sock *sk, const struct sock *sk2,
-			 bool match_wildcard);
+int ipv6_rcv_saddr_equal(const struct sock *sk, const struct sock *sk2);
 void addrconf_join_solict(struct net_device *dev, const struct in6_addr *addr);
 void addrconf_leave_solict(struct inet6_dev *idev, const struct in6_addr *addr);
 
@@ -176,7 +173,6 @@ void ipv6_mc_unmap(struct inet6_dev *idev);
 void ipv6_mc_remap(struct inet6_dev *idev);
 void ipv6_mc_init_dev(struct inet6_dev *idev);
 void ipv6_mc_destroy_dev(struct inet6_dev *idev);
-int ipv6_mc_check_mld(struct sk_buff *skb, struct sk_buff **skb_trimmed);
 void addrconf_dad_failure(struct inet6_ifaddr *ifp);
 
 bool ipv6_chk_mcast_addr(struct net_device *dev, const struct in6_addr *group,
@@ -192,10 +188,11 @@ struct ipv6_stub {
 				 const struct in6_addr *addr);
 	int (*ipv6_sock_mc_drop)(struct sock *sk, int ifindex,
 				 const struct in6_addr *addr);
-	int (*ipv6_dst_lookup)(struct net *net, struct sock *sk,
-			       struct dst_entry **dst, struct flowi6 *fl6);
+	int (*ipv6_dst_lookup)(struct sock *sk, struct dst_entry **dst,
+				struct flowi6 *fl6);
 	void (*udpv6_encap_enable)(void);
-	void (*ndisc_send_na)(struct net_device *dev, const struct in6_addr *daddr,
+	void (*ndisc_send_na)(struct net_device *dev, struct neighbour *neigh,
+			      const struct in6_addr *daddr,
 			      const struct in6_addr *solicited_addr,
 			      bool router, bool solicited, bool override, bool inc_opt);
 	struct neigh_table *nd_tbl;

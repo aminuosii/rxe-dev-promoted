@@ -17,6 +17,10 @@
  *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  *  General Public License for more details.
  *
+ *  You should have received a copy of the GNU General Public License along
+ *  with this program; if not, write to the Free Software Foundation, Inc.,
+ *  59 Temple Place, Suite 330, Boston, MA 02111-1307 USA.
+ *
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
 
@@ -417,11 +421,11 @@ static int acpi_battery_set_alarm(struct acpi_battery *battery)
 		if ((value & 0xf000) != sel) {
 			value &= 0x0fff;
 			value |= sel;
-			ret = acpi_smbus_write(sbs->hc, SMBUS_WRITE_WORD,
+		ret = acpi_smbus_write(sbs->hc, SMBUS_WRITE_WORD,
 					 ACPI_SBS_MANAGER,
 					 0x01, (u8 *)&value, 2);
-			if (ret)
-				goto end;
+		if (ret)
+			goto end;
 		}
 	}
 	ret = acpi_smbus_write(sbs->hc, SMBUS_WRITE_WORD, ACPI_SBS_BATTERY,
@@ -680,7 +684,7 @@ static int acpi_sbs_add(struct acpi_device *device)
 	if (!sbs_manager_broken) {
 		result = acpi_manager_get_info(sbs);
 		if (!result) {
-			sbs->manager_present = 1;
+			sbs->manager_present = 0;
 			for (id = 0; id < MAX_SBS_BAT; ++id)
 				if ((sbs->batteries_supported & (1 << id)))
 					acpi_battery_add(sbs, id);

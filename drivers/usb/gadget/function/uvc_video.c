@@ -391,8 +391,7 @@ int uvcg_video_init(struct uvc_video *video)
 	video->imagesize = 320 * 240 * 2;
 
 	/* Initialize the video buffers queue. */
-	uvcg_queue_init(&video->queue, V4L2_BUF_TYPE_VIDEO_OUTPUT,
-			&video->mutex);
+	uvcg_queue_init(&video->queue, V4L2_BUF_TYPE_VIDEO_OUTPUT);
 	return 0;
 }
 

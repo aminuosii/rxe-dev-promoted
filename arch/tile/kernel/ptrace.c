@@ -255,8 +255,12 @@ int do_syscall_trace_enter(struct pt_regs *regs)
 {
 	u32 work = ACCESS_ONCE(current_thread_info()->flags);
 
-	if (secure_computing() == -1)
-		return -1;
+	/*
+	 * If TIF_NOHZ is set, we are required to call user_exit() before
+	 * doing anything that could touch RCU.
+	 */
+	if (work & _TIF_NOHZ)
+		user_exit();
 
 	if (work & _TIF_SYSCALL_TRACE) {
 		if (tracehook_report_syscall_entry(regs))
@@ -272,6 +276,12 @@ int do_syscall_trace_enter(struct pt_regs *regs)
 void do_syscall_trace_exit(struct pt_regs *regs)
 {
 	long errno;
+
+	/*
+	 * We may come here right after calling schedule_user()
+	 * in which case we can be in RCU user mode.
+	 */
+	user_exit();
 
 	/*
 	 * The standard tile calling convention returns the value (or negative
@@ -309,5 +319,7 @@ void send_sigtrap(struct task_struct *tsk, struct pt_regs *regs)
 /* Handle synthetic interrupt delivered only by the simulator. */
 void __kprobes do_breakpoint(struct pt_regs* regs, int fault_num)
 {
+	enum ctx_state prev_state = exception_enter();
 	send_sigtrap(current, regs);
+	exception_exit(prev_state);
 }

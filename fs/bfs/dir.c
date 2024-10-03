@@ -70,7 +70,7 @@ static int bfs_readdir(struct file *f, struct dir_context *ctx)
 
 const struct file_operations bfs_dir_operations = {
 	.read		= generic_read_dir,
-	.iterate_shared	= bfs_readdir,
+	.iterate	= bfs_readdir,
 	.fsync		= generic_file_fsync,
 	.llseek		= generic_file_llseek,
 };
@@ -153,7 +153,7 @@ static struct dentry *bfs_lookup(struct inode *dir, struct dentry *dentry,
 static int bfs_link(struct dentry *old, struct inode *dir,
 						struct dentry *new)
 {
-	struct inode *inode = d_inode(old);
+	struct inode *inode = old->d_inode;
 	struct bfs_sb_info *info = BFS_SB(inode->i_sb);
 	int err;
 
@@ -176,7 +176,7 @@ static int bfs_link(struct dentry *old, struct inode *dir,
 static int bfs_unlink(struct inode *dir, struct dentry *dentry)
 {
 	int error = -ENOENT;
-	struct inode *inode = d_inode(dentry);
+	struct inode *inode = dentry->d_inode;
 	struct buffer_head *bh;
 	struct bfs_dirent *de;
 	struct bfs_sb_info *info = BFS_SB(inode->i_sb);
@@ -216,7 +216,7 @@ static int bfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 	int error = -ENOENT;
 
 	old_bh = new_bh = NULL;
-	old_inode = d_inode(old_dentry);
+	old_inode = old_dentry->d_inode;
 	if (S_ISDIR(old_inode->i_mode))
 		return -EINVAL;
 
@@ -231,7 +231,7 @@ static int bfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 		goto end_rename;
 
 	error = -EPERM;
-	new_inode = d_inode(new_dentry);
+	new_inode = new_dentry->d_inode;
 	new_bh = bfs_find_entry(new_dir, 
 				new_dentry->d_name.name, 
 				new_dentry->d_name.len, &new_de);

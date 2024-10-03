@@ -31,8 +31,7 @@
 int
 xfs_break_layouts(
 	struct inode		*inode,
-	uint			*iolock,
-	bool			with_imutex)
+	uint			*iolock)
 {
 	struct xfs_inode	*ip = XFS_I(inode);
 	int			error;
@@ -41,12 +40,8 @@ xfs_break_layouts(
 
 	while ((error = break_layout(inode, false) == -EWOULDBLOCK)) {
 		xfs_iunlock(ip, *iolock);
-		if (with_imutex && (*iolock & XFS_IOLOCK_EXCL))
-			inode_unlock(inode);
 		error = break_layout(inode, true);
 		*iolock = XFS_IOLOCK_EXCL;
-		if (with_imutex)
-			inode_lock(inode);
 		xfs_ilock(ip, *iolock);
 	}
 
@@ -181,11 +176,6 @@ xfs_fs_map_blocks(
 		ASSERT(imap.br_startblock != DELAYSTARTBLOCK);
 
 		if (!nimaps || imap.br_startblock == HOLESTARTBLOCK) {
-			/*
-			 * xfs_iomap_write_direct() expects to take ownership of
-			 * the shared ilock.
-			 */
-			xfs_ilock(ip, XFS_ILOCK_SHARED);
 			error = xfs_iomap_write_direct(ip, offset, length,
 						       &imap, nimaps);
 			if (error)
@@ -293,8 +283,8 @@ xfs_fs_commit_blocks(
 		 * Make sure reads through the pagecache see the new data.
 		 */
 		error = invalidate_inode_pages2_range(inode->i_mapping,
-					start >> PAGE_SHIFT,
-					(end - 1) >> PAGE_SHIFT);
+					start >> PAGE_CACHE_SHIFT,
+					(end - 1) >> PAGE_CACHE_SHIFT);
 		WARN_ON_ONCE(error);
 
 		error = xfs_iomap_write_unwritten(ip, start, length);
@@ -308,9 +298,12 @@ xfs_fs_commit_blocks(
 			goto out_drop_iolock;
 	}
 
-	error = xfs_trans_alloc(mp, &M_RES(mp)->tr_ichange, 0, 0, 0, &tp);
-	if (error)
+	tp = xfs_trans_alloc(mp, XFS_TRANS_SETATTR_NOT_SIZE);
+	error = xfs_trans_reserve(tp, &M_RES(mp)->tr_ichange, 0, 0);
+	if (error) {
+		xfs_trans_cancel(tp, 0);
 		goto out_drop_iolock;
+	}
 
 	xfs_ilock(ip, XFS_ILOCK_EXCL);
 	xfs_trans_ijoin(tp, ip, XFS_ILOCK_EXCL);
@@ -323,7 +316,7 @@ xfs_fs_commit_blocks(
 	}
 
 	xfs_trans_set_sync(tp);
-	error = xfs_trans_commit(tp);
+	error = xfs_trans_commit(tp, 0);
 
 out_drop_iolock:
 	xfs_iunlock(ip, XFS_IOLOCK_EXCL);

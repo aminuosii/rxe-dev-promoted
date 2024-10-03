@@ -2278,10 +2278,9 @@ static int ohci_enable(struct fw_card *card,
 	u32 lps, version, irqs;
 	int i, ret;
 
-	ret = software_reset(ohci);
-	if (ret < 0) {
+	if (software_reset(ohci)) {
 		ohci_err(ohci, "failed to reset ohci card\n");
-		return ret;
+		return -EBUSY;
 	}
 
 	/*
@@ -3676,11 +3675,6 @@ static int pci_probe(struct pci_dev *dev,
 
 	reg_write(ohci, OHCI1394_IsoXmitIntMaskSet, ~0);
 	ohci->it_context_support = reg_read(ohci, OHCI1394_IsoXmitIntMaskSet);
-	/* JMicron JMB38x often shows 0 at first read, just ignore it */
-	if (!ohci->it_context_support) {
-		ohci_notice(ohci, "overriding IsoXmitIntMask\n");
-		ohci->it_context_support = 0xf;
-	}
 	reg_write(ohci, OHCI1394_IsoXmitIntMaskClear, ~0);
 	ohci->it_context_mask = ohci->it_context_support;
 	ohci->n_it = hweight32(ohci->it_context_mask);

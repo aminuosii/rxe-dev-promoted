@@ -81,7 +81,7 @@ again:
 					HFSPLUS_I(HFSPLUS_SB(sb)->hidden_dir)->
 						create_date ||
 				entry.file.create_date ==
-					HFSPLUS_I(d_inode(sb->s_root))->
+					HFSPLUS_I(sb->s_root->d_inode)->
 						create_date) &&
 				HFSPLUS_SB(sb)->hidden_dir) {
 			struct qstr str;
@@ -271,14 +271,8 @@ next:
 		}
 		file->private_data = rd;
 		rd->file = file;
-		spin_lock(&HFSPLUS_I(inode)->open_dir_lock);
 		list_add(&rd->list, &HFSPLUS_I(inode)->open_dir_list);
-		spin_unlock(&HFSPLUS_I(inode)->open_dir_lock);
 	}
-	/*
-	 * Can be done after the list insertion; exclusion with
-	 * hfsplus_delete_cat() is provided by directory lock.
-	 */
 	memcpy(&rd->key, fd.key, sizeof(struct hfsplus_cat_key));
 out:
 	kfree(strbuf);
@@ -290,9 +284,9 @@ static int hfsplus_dir_release(struct inode *inode, struct file *file)
 {
 	struct hfsplus_readdir_data *rd = file->private_data;
 	if (rd) {
-		spin_lock(&HFSPLUS_I(inode)->open_dir_lock);
+		mutex_lock(&inode->i_mutex);
 		list_del(&rd->list);
-		spin_unlock(&HFSPLUS_I(inode)->open_dir_lock);
+		mutex_unlock(&inode->i_mutex);
 		kfree(rd);
 	}
 	return 0;
@@ -302,8 +296,8 @@ static int hfsplus_link(struct dentry *src_dentry, struct inode *dst_dir,
 			struct dentry *dst_dentry)
 {
 	struct hfsplus_sb_info *sbi = HFSPLUS_SB(dst_dir->i_sb);
-	struct inode *inode = d_inode(src_dentry);
-	struct inode *src_dir = d_inode(src_dentry->d_parent);
+	struct inode *inode = src_dentry->d_inode;
+	struct inode *src_dir = src_dentry->d_parent->d_inode;
 	struct qstr str;
 	char name[32];
 	u32 cnid, id;
@@ -359,7 +353,7 @@ out:
 static int hfsplus_unlink(struct inode *dir, struct dentry *dentry)
 {
 	struct hfsplus_sb_info *sbi = HFSPLUS_SB(dir->i_sb);
-	struct inode *inode = d_inode(dentry);
+	struct inode *inode = dentry->d_inode;
 	struct qstr str;
 	char name[32];
 	u32 cnid;
@@ -416,7 +410,7 @@ out:
 static int hfsplus_rmdir(struct inode *dir, struct dentry *dentry)
 {
 	struct hfsplus_sb_info *sbi = HFSPLUS_SB(dir->i_sb);
-	struct inode *inode = d_inode(dentry);
+	struct inode *inode = dentry->d_inode;
 	int res;
 
 	if (inode->i_size != 2)
@@ -535,7 +529,7 @@ static int hfsplus_rename(struct inode *old_dir, struct dentry *old_dentry,
 	int res;
 
 	/* Unlink destination if it already exists */
-	if (d_really_is_positive(new_dentry)) {
+	if (new_dentry->d_inode) {
 		if (d_is_dir(new_dentry))
 			res = hfsplus_rmdir(new_dir, new_dentry);
 		else
@@ -575,7 +569,7 @@ const struct inode_operations hfsplus_dir_inode_operations = {
 const struct file_operations hfsplus_dir_operations = {
 	.fsync		= hfsplus_file_fsync,
 	.read		= generic_read_dir,
-	.iterate_shared	= hfsplus_readdir,
+	.iterate	= hfsplus_readdir,
 	.unlocked_ioctl = hfsplus_ioctl,
 	.llseek		= generic_file_llseek,
 	.release	= hfsplus_dir_release,

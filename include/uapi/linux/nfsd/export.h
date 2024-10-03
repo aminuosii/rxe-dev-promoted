@@ -21,9 +21,6 @@
 
 /*
  * Export flags.
- *
- * Please update the expflags[] array in fs/nfsd/export.c when adding
- * a new flag.
  */
 #define NFSEXP_READONLY		0x0001
 #define NFSEXP_INSECURE_PORT	0x0002

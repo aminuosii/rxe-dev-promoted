@@ -40,8 +40,13 @@ pmdval_t early_pmd_flags = __PAGE_KERNEL_LARGE & ~(_PAGE_GLOBAL | _PAGE_NX);
 /* Wipe all early page tables except for the kernel symbol map */
 static void __init reset_early_page_tables(void)
 {
-	memset(early_level4_pgt, 0, sizeof(pgd_t)*(PTRS_PER_PGD-1));
+	unsigned long i;
+
+	for (i = 0; i < PTRS_PER_PGD-1; i++)
+		early_level4_pgt[i].pgd = 0;
+
 	next_early_pgt = 0;
+
 	write_cr3(__pa_nodebug(early_level4_pgt));
 }
 
@@ -49,6 +54,7 @@ static void __init reset_early_page_tables(void)
 int __init early_make_pgtable(unsigned long address)
 {
 	unsigned long physaddr = address - __PAGE_OFFSET;
+	unsigned long i;
 	pgdval_t pgd, *pgd_p;
 	pudval_t pud, *pud_p;
 	pmdval_t pmd, *pmd_p;
@@ -75,7 +81,8 @@ again:
 		}
 
 		pud_p = (pudval_t *)early_dynamic_pgts[next_early_pgt++];
-		memset(pud_p, 0, sizeof(*pud_p) * PTRS_PER_PUD);
+		for (i = 0; i < PTRS_PER_PUD; i++)
+			pud_p[i] = 0;
 		*pgd_p = (pgdval_t)pud_p - __START_KERNEL_map + phys_base + _KERNPG_TABLE;
 	}
 	pud_p += pud_index(address);
@@ -90,7 +97,8 @@ again:
 		}
 
 		pmd_p = (pmdval_t *)early_dynamic_pgts[next_early_pgt++];
-		memset(pmd_p, 0, sizeof(*pmd_p) * PTRS_PER_PMD);
+		for (i = 0; i < PTRS_PER_PMD; i++)
+			pmd_p[i] = 0;
 		*pud_p = (pudval_t)pmd_p - __START_KERNEL_map + phys_base + _KERNPG_TABLE;
 	}
 	pmd = (physaddr & PMD_MASK) + early_pmd_flags;
@@ -153,14 +161,13 @@ asmlinkage __visible void __init x86_64_start_kernel(char * real_mode_data)
 	/* Kill off the identity-map trampoline */
 	reset_early_page_tables();
 
+	kasan_map_early_shadow(early_level4_pgt);
+
+	/* clear bss before set_intr_gate with early_idt_handler */
 	clear_bss();
 
-	clear_page(init_level4_pgt);
-
-	kasan_early_init();
-
 	for (i = 0; i < NUM_EXCEPTION_VECTORS; i++)
-		set_intr_gate(i, early_idt_handler_array[i]);
+		set_intr_gate(i, early_idt_handlers[i]);
 	load_idt((const struct desc_ptr *)&idt_descr);
 
 	copy_bootdata(__va(real_mode_data));
@@ -170,8 +177,11 @@ asmlinkage __visible void __init x86_64_start_kernel(char * real_mode_data)
 	 */
 	load_ucode_bsp();
 
+	clear_page(init_level4_pgt);
 	/* set init_level4_pgt kernel high mapping*/
 	init_level4_pgt[511] = early_level4_pgt[511];
+
+	kasan_map_early_shadow(init_level4_pgt);
 
 	x86_64_start_reservations(real_mode_data);
 }
@@ -182,16 +192,7 @@ void __init x86_64_start_reservations(char *real_mode_data)
 	if (!boot_params.hdr.version)
 		copy_bootdata(__va(real_mode_data));
 
-	x86_early_init_platform_quirks();
 	reserve_ebda_region();
-
-	switch (boot_params.hdr.hardware_subarch) {
-	case X86_SUBARCH_INTEL_MID:
-		x86_intel_mid_early_setup();
-		break;
-	default:
-		break;
-	}
 
 	start_kernel();
 }

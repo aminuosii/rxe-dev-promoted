@@ -19,7 +19,7 @@
 #include <media/v4l2-ioctl.h>
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-image-sizes.h>
-#include <media/i2c/ov7670.h>
+#include <media/ov7670.h>
 #include <media/videobuf-dma-sg.h>
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
@@ -249,15 +249,13 @@ static int viacam_set_flip(struct via_camera *cam)
  */
 static int viacam_configure_sensor(struct via_camera *cam)
 {
-	struct v4l2_subdev_format format = {
-		.which = V4L2_SUBDEV_FORMAT_ACTIVE,
-	};
+	struct v4l2_mbus_framefmt mbus_fmt;
 	int ret;
 
-	v4l2_fill_mbus_format(&format.format, &cam->sensor_format, cam->mbus_code);
+	v4l2_fill_mbus_format(&mbus_fmt, &cam->sensor_format, cam->mbus_code);
 	ret = sensor_call(cam, core, init, 0);
 	if (ret == 0)
-		ret = sensor_call(cam, pad, set_fmt, NULL, &format);
+		ret = sensor_call(cam, video, s_mbus_fmt, &mbus_fmt);
 	/*
 	 * OV7670 does weird things if flip is set *before* format...
 	 */
@@ -905,17 +903,14 @@ static int viacam_do_try_fmt(struct via_camera *cam,
 		struct v4l2_pix_format *upix, struct v4l2_pix_format *spix)
 {
 	int ret;
-	struct v4l2_subdev_pad_config pad_cfg;
-	struct v4l2_subdev_format format = {
-		.which = V4L2_SUBDEV_FORMAT_TRY,
-	};
+	struct v4l2_mbus_framefmt mbus_fmt;
 	struct via_format *f = via_find_format(upix->pixelformat);
 
 	upix->pixelformat = f->pixelformat;
 	viacam_fmt_pre(upix, spix);
-	v4l2_fill_mbus_format(&format.format, spix, f->mbus_code);
-	ret = sensor_call(cam, pad, set_fmt, &pad_cfg, &format);
-	v4l2_fill_pix_format(spix, &format.format);
+	v4l2_fill_mbus_format(&mbus_fmt, spix, f->mbus_code);
+	ret = sensor_call(cam, video, try_mbus_fmt, &mbus_fmt);
+	v4l2_fill_pix_format(spix, &mbus_fmt);
 	viacam_fmt_post(upix, spix);
 	return ret;
 }
@@ -1152,23 +1147,12 @@ static int viacam_enum_frameintervals(struct file *filp, void *priv,
 		struct v4l2_frmivalenum *interval)
 {
 	struct via_camera *cam = priv;
-	struct v4l2_subdev_frame_interval_enum fie = {
-		.index = interval->index,
-		.code = cam->mbus_code,
-		.width = cam->sensor_format.width,
-		.height = cam->sensor_format.height,
-		.which = V4L2_SUBDEV_FORMAT_ACTIVE,
-	};
 	int ret;
 
 	mutex_lock(&cam->lock);
-	ret = sensor_call(cam, pad, enum_frame_interval, NULL, &fie);
+	ret = sensor_call(cam, video, enum_frameintervals, interval);
 	mutex_unlock(&cam->lock);
-	if (ret)
-		return ret;
-	interval->type = V4L2_FRMIVAL_TYPE_DISCRETE;
-	interval->discrete = fie.interval;
-	return 0;
+	return ret;
 }
 
 

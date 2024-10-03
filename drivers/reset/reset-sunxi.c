@@ -70,7 +70,7 @@ static int sunxi_reset_deassert(struct reset_controller_dev *rcdev,
 	return 0;
 }
 
-static const struct reset_control_ops sunxi_reset_ops = {
+static struct reset_control_ops sunxi_reset_ops = {
 	.assert		= sunxi_reset_assert,
 	.deassert	= sunxi_reset_deassert,
 };
@@ -108,8 +108,9 @@ static int sunxi_reset_init(struct device_node *np)
 	data->rcdev.nr_resets = size * 32;
 	data->rcdev.ops = &sunxi_reset_ops;
 	data->rcdev.of_node = np;
+	reset_controller_register(&data->rcdev);
 
-	return reset_controller_register(&data->rcdev);
+	return 0;
 
 err_alloc:
 	kfree(data);
@@ -121,7 +122,7 @@ err_alloc:
  * our system, before we can even think of using a regular device
  * driver for it.
  */
-static const struct of_device_id sunxi_early_reset_dt_ids[] __initconst = {
+static const struct of_device_id sunxi_early_reset_dt_ids[] __initdata = {
 	{ .compatible = "allwinner,sun6i-a31-ahb1-reset", },
 	{ /* sentinel */ },
 };

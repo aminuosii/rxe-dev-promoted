@@ -15,14 +15,18 @@
 #include <asm/cpuidle.h>
 #include <asm/cpu_ops.h>
 
-int __init arm_cpuidle_init(unsigned int cpu)
+int arm_cpuidle_init(unsigned int cpu)
 {
 	int ret = -EOPNOTSUPP;
+	struct device_node *cpu_node = of_cpu_device_node_get(cpu);
 
-	if (cpu_ops[cpu] && cpu_ops[cpu]->cpu_suspend &&
-			cpu_ops[cpu]->cpu_init_idle)
-		ret = cpu_ops[cpu]->cpu_init_idle(cpu);
+	if (!cpu_node)
+		return -ENODEV;
 
+	if (cpu_ops[cpu] && cpu_ops[cpu]->cpu_init_idle)
+		ret = cpu_ops[cpu]->cpu_init_idle(cpu_node, cpu);
+
+	of_node_put(cpu_node);
 	return ret;
 }
 
@@ -33,9 +37,15 @@ int __init arm_cpuidle_init(unsigned int cpu)
  * Return: 0 on success, -EOPNOTSUPP if CPU suspend hook not initialized, CPU
  * operations back-end error code otherwise.
  */
-int arm_cpuidle_suspend(int index)
+int cpu_suspend(unsigned long arg)
 {
 	int cpu = smp_processor_id();
 
-	return cpu_ops[cpu]->cpu_suspend(index);
+	/*
+	 * If cpu_ops have not been registered or suspend
+	 * has not been initialized, cpu_suspend call fails early.
+	 */
+	if (!cpu_ops[cpu] || !cpu_ops[cpu]->cpu_suspend)
+		return -EOPNOTSUPP;
+	return cpu_ops[cpu]->cpu_suspend(arg);
 }

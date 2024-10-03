@@ -23,43 +23,50 @@
 #include <linux/seq_file.h>
 
 #include <asm/fixmap.h>
-#include <asm/kasan.h>
 #include <asm/memory.h>
 #include <asm/pgtable.h>
 #include <asm/pgtable-hwdef.h>
+
+#define LOWEST_ADDR	(UL(0xffffffffffffffff) << VA_BITS)
 
 struct addr_marker {
 	unsigned long start_address;
 	const char *name;
 };
 
-static const struct addr_marker address_markers[] = {
-#ifdef CONFIG_KASAN
-	{ KASAN_SHADOW_START,		"Kasan shadow start" },
-	{ KASAN_SHADOW_END,		"Kasan shadow end" },
-#endif
-	{ MODULES_VADDR,		"Modules start" },
-	{ MODULES_END,			"Modules end" },
-	{ VMALLOC_START,		"vmalloc() Area" },
-	{ VMALLOC_END,			"vmalloc() End" },
-	{ FIXADDR_START,		"Fixmap start" },
-	{ FIXADDR_TOP,			"Fixmap end" },
-	{ PCI_IO_START,			"PCI I/O start" },
-	{ PCI_IO_END,			"PCI I/O end" },
+enum address_markers_idx {
+	VMALLOC_START_NR = 0,
+	VMALLOC_END_NR,
 #ifdef CONFIG_SPARSEMEM_VMEMMAP
-	{ VMEMMAP_START,		"vmemmap start" },
-	{ VMEMMAP_START + VMEMMAP_SIZE,	"vmemmap end" },
+	VMEMMAP_START_NR,
+	VMEMMAP_END_NR,
 #endif
-	{ PAGE_OFFSET,			"Linear Mapping" },
-	{ -1,				NULL },
+	FIXADDR_START_NR,
+	FIXADDR_END_NR,
+	PCI_START_NR,
+	PCI_END_NR,
+	MODULES_START_NR,
+	MODUELS_END_NR,
+	KERNEL_SPACE_NR,
 };
 
-/*
- * The page dumper groups page table entries of the same type into a single
- * description. It uses pg_state to track the range information while
- * iterating over the pte entries. When the continuity is broken it then
- * dumps out a description of the range.
- */
+static struct addr_marker address_markers[] = {
+	{ VMALLOC_START,	"vmalloc() Area" },
+	{ VMALLOC_END,		"vmalloc() End" },
+#ifdef CONFIG_SPARSEMEM_VMEMMAP
+	{ 0,			"vmemmap start" },
+	{ 0,			"vmemmap end" },
+#endif
+	{ FIXADDR_START,	"Fixmap start" },
+	{ FIXADDR_TOP,		"Fixmap end" },
+	{ PCI_IO_START,		"PCI I/O start" },
+	{ PCI_IO_END,		"PCI I/O end" },
+	{ MODULES_VADDR,	"Modules start" },
+	{ MODULES_END,		"Modules end" },
+	{ PAGE_OFFSET,		"Kernel Mapping" },
+	{ -1,			NULL },
+};
+
 struct pg_state {
 	struct seq_file *seq;
 	const struct addr_marker *marker;
@@ -77,11 +84,6 @@ struct prot_bits {
 
 static const struct prot_bits pte_bits[] = {
 	{
-		.mask	= PTE_VALID,
-		.val	= PTE_VALID,
-		.set	= " ",
-		.clear	= "F",
-	}, {
 		.mask	= PTE_USER,
 		.val	= PTE_USER,
 		.set	= "USR",
@@ -112,16 +114,6 @@ static const struct prot_bits pte_bits[] = {
 		.set	= "NG",
 		.clear	= "  ",
 	}, {
-		.mask	= PTE_CONT,
-		.val	= PTE_CONT,
-		.set	= "CON",
-		.clear	= "   ",
-	}, {
-		.mask	= PTE_TABLE_BIT,
-		.val	= PTE_TABLE_BIT,
-		.set	= "   ",
-		.clear	= "BLK",
-	}, {
 		.mask	= PTE_UXN,
 		.val	= PTE_UXN,
 		.set	= "UXN",
@@ -150,7 +142,6 @@ static const struct prot_bits pte_bits[] = {
 
 struct pg_level {
 	const struct prot_bits *bits;
-	const char *name;
 	size_t num;
 	u64 mask;
 };
@@ -158,19 +149,15 @@ struct pg_level {
 static struct pg_level pg_level[] = {
 	{
 	}, { /* pgd */
-		.name	= "PGD",
 		.bits	= pte_bits,
 		.num	= ARRAY_SIZE(pte_bits),
 	}, { /* pud */
-		.name	= (CONFIG_PGTABLE_LEVELS > 3) ? "PUD" : "PGD",
 		.bits	= pte_bits,
 		.num	= ARRAY_SIZE(pte_bits),
 	}, { /* pmd */
-		.name	= (CONFIG_PGTABLE_LEVELS > 2) ? "PMD" : "PGD",
 		.bits	= pte_bits,
 		.num	= ARRAY_SIZE(pte_bits),
 	}, { /* pte */
-		.name	= "PTE",
 		.bits	= pte_bits,
 		.num	= ARRAY_SIZE(pte_bits),
 	},
@@ -211,7 +198,7 @@ static void note_page(struct pg_state *st, unsigned long addr, unsigned level,
 		unsigned long delta;
 
 		if (st->current_prot) {
-			seq_printf(st->seq, "0x%016lx-0x%016lx   ",
+			seq_printf(st->seq, "0x%16lx-0x%16lx   ",
 				   st->start_address, addr);
 
 			delta = (addr - st->start_address) >> 10;
@@ -219,8 +206,7 @@ static void note_page(struct pg_state *st, unsigned long addr, unsigned level,
 				delta >>= 10;
 				unit++;
 			}
-			seq_printf(st->seq, "%9lu%c %s", delta, *unit,
-				   pg_level[st->level].name);
+			seq_printf(st->seq, "%9lu%c", delta, *unit);
 			if (pg_level[st->level].bits)
 				dump_prot(st, pg_level[st->level].bits,
 					  pg_level[st->level].num);
@@ -314,7 +300,7 @@ static int ptdump_show(struct seq_file *m, void *v)
 		.marker = address_markers,
 	};
 
-	walk_pgd(&st, &init_mm, VA_START);
+	walk_pgd(&st, &init_mm, LOWEST_ADDR);
 
 	note_page(&st, 0, 0, 0);
 	return 0;
@@ -341,6 +327,11 @@ static int ptdump_init(void)
 		if (pg_level[i].bits)
 			for (j = 0; j < pg_level[i].num; j++)
 				pg_level[i].mask |= pg_level[i].bits[j].mask;
+
+	address_markers[VMEMMAP_START_NR].start_address =
+				(unsigned long)virt_to_page(PAGE_OFFSET);
+	address_markers[VMEMMAP_END_NR].start_address =
+				(unsigned long)virt_to_page(high_memory);
 
 	pe = debugfs_create_file("kernel_page_tables", 0400, NULL, NULL,
 				 &ptdump_fops);

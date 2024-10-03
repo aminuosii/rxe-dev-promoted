@@ -1,5 +1,5 @@
-/* Intel(R) Ethernet Switch Host Interface Driver
- * Copyright(c) 2013 - 2016 Intel Corporation.
+/* Intel Ethernet Switch Host Interface Driver
+ * Copyright(c) 2013 - 2015 Intel Corporation.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -20,7 +20,7 @@
 
 #include "fm10k.h"
 #include <linux/vmalloc.h>
-#ifdef CONFIG_FM10K_VXLAN
+#if IS_ENABLED(CONFIG_FM10K_VXLAN)
 #include <net/vxlan.h>
 #endif /* CONFIG_FM10K_VXLAN */
 
@@ -243,6 +243,9 @@ void fm10k_clean_all_tx_rings(struct fm10k_intfc *interface)
 
 	for (i = 0; i < interface->num_tx_queues; i++)
 		fm10k_clean_tx_ring(interface->tx_ring[i]);
+
+	/* remove any stale timestamp buffers and free them */
+	skb_queue_purge(&interface->ts_tx_skb_queue);
 }
 
 /**
@@ -437,7 +440,7 @@ static void fm10k_restore_vxlan_port(struct fm10k_intfc *interface)
  * @sa_family: Address family of new port
  * @port: port number used for VXLAN
  *
- * This function is called when a new VXLAN interface has added a new port
+ * This funciton is called when a new VXLAN interface has added a new port
  * number to the range that is currently in use for VXLAN.  The new port
  * number is always added to the tail so that the port number list should
  * match the order in which the ports were allocated.  The head of the list
@@ -481,7 +484,7 @@ insert_tail:
  * @sa_family: Address family of freed port
  * @port: port number used for VXLAN
  *
- * This function is called when a new VXLAN interface has freed a port
+ * This funciton is called when a new VXLAN interface has freed a port
  * number from the range that is currently in use for VXLAN.  The freed
  * port is removed from the list and the new head is used to determine
  * the port number for offloads.
@@ -553,11 +556,11 @@ int fm10k_open(struct net_device *netdev)
 	if (err)
 		goto err_set_queues;
 
-#ifdef CONFIG_FM10K_VXLAN
+#if IS_ENABLED(CONFIG_FM10K_VXLAN)
 	/* update VXLAN port configuration */
 	vxlan_get_rx_port(netdev);
-#endif
 
+#endif
 	fm10k_up(interface);
 
 	return 0;
@@ -605,7 +608,7 @@ static netdev_tx_t fm10k_xmit_frame(struct sk_buff *skb, struct net_device *dev)
 	unsigned int r_idx = skb->queue_mapping;
 	int err;
 
-	if ((skb->protocol == htons(ETH_P_8021Q)) &&
+	if ((skb->protocol ==  htons(ETH_P_8021Q)) &&
 	    !skb_vlan_tag_present(skb)) {
 		/* FM10K only supports hardware tagging, any tags in frame
 		 * are considered 2nd level or "outer" tags
@@ -624,12 +627,10 @@ static netdev_tx_t fm10k_xmit_frame(struct sk_buff *skb, struct net_device *dev)
 
 		/* verify the skb head is not shared */
 		err = skb_cow_head(skb, 0);
-		if (err) {
-			dev_kfree_skb(skb);
+		if (err)
 			return NETDEV_TX_OK;
-		}
 
-		/* locate VLAN header */
+		/* locate vlan header */
 		vhdr = (struct vlan_hdr *)(skb->data + ETH_HLEN);
 
 		/* pull the 2 key pieces of data out of it */
@@ -656,6 +657,10 @@ static netdev_tx_t fm10k_xmit_frame(struct sk_buff *skb, struct net_device *dev)
 			return NETDEV_TX_OK;
 		__skb_put(skb, pad_len);
 	}
+
+	/* prepare packet for hardware time stamping */
+	if (unlikely(skb_shinfo(skb)->tx_flags & SKBTX_HW_TSTAMP))
+		fm10k_ts_tx_enqueue(interface, skb);
 
 	if (r_idx >= interface->num_tx_queues)
 		r_idx %= interface->num_tx_queues;
@@ -698,7 +703,7 @@ static void fm10k_tx_timeout(struct net_device *netdev)
 	} else {
 		netif_info(interface, drv, netdev,
 			   "Fake Tx hang detected with timeout of %d seconds\n",
-			   netdev->watchdog_timeo / HZ);
+			   netdev->watchdog_timeo/HZ);
 
 		/* fake Tx hang - increase the kernel timeout */
 		if (netdev->watchdog_timeo < TX_TIMEO_LIMIT)
@@ -753,7 +758,6 @@ static int fm10k_update_vid(struct net_device *netdev, u16 vid, bool set)
 	struct fm10k_intfc *interface = netdev_priv(netdev);
 	struct fm10k_hw *hw = &interface->hw;
 	s32 err;
-	int i;
 
 	/* updates do not apply to VLAN 0 */
 	if (!vid)
@@ -771,27 +775,8 @@ static int fm10k_update_vid(struct net_device *netdev, u16 vid, bool set)
 	if (!set)
 		clear_bit(vid, interface->active_vlans);
 
-	/* disable the default VLAN ID on ring if we have an active VLAN */
-	for (i = 0; i < interface->num_rx_queues; i++) {
-		struct fm10k_ring *rx_ring = interface->rx_ring[i];
-		u16 rx_vid = rx_ring->vid & (VLAN_N_VID - 1);
-
-		if (test_bit(rx_vid, interface->active_vlans))
-			rx_ring->vid |= FM10K_VLAN_CLEAR;
-		else
-			rx_ring->vid &= ~FM10K_VLAN_CLEAR;
-	}
-
-	/* Do not remove default VLAN ID related entries from VLAN and MAC
-	 * tables
-	 */
-	if (!set && vid == hw->mac.default_vid)
-		return 0;
-
-	/* Do not throw an error if the interface is down. We will sync once
-	 * we come up
-	 */
-	if (test_bit(__FM10K_DOWN, &interface->state))
+	/* if default VLAN is already present do nothing */
+	if (vid == hw->mac.default_vid)
 		return 0;
 
 	fm10k_mbx_lock(interface);
@@ -809,7 +794,7 @@ static int fm10k_update_vid(struct net_device *netdev, u16 vid, bool set)
 	if (err)
 		goto err_out;
 
-	/* set VLAN ID prior to syncing/unsyncing the VLAN */
+	/* set vid prior to syncing/unsyncing the VLAN */
 	interface->vid = vid + (set ? VLAN_N_VID : 0);
 
 	/* Update the unicast and multicast address list to add/drop VLAN */
@@ -877,7 +862,7 @@ static int __fm10k_uc_sync(struct net_device *dev,
 		return -EADDRNOTAVAIL;
 
 	/* update table with current entries */
-	for (vid = hw->mac.default_vid ? fm10k_find_next_vlan(interface, 0) : 1;
+	for (vid = hw->mac.default_vid ? fm10k_find_next_vlan(interface, 0) : 0;
 	     vid < VLAN_N_VID;
 	     vid = fm10k_find_next_vlan(interface, vid)) {
 		err = hw->mac.ops.update_uc_addr(hw, glort, addr,
@@ -938,12 +923,18 @@ static int __fm10k_mc_sync(struct net_device *dev,
 	struct fm10k_intfc *interface = netdev_priv(dev);
 	struct fm10k_hw *hw = &interface->hw;
 	u16 vid, glort = interface->glort;
+	s32 err;
+
+	if (!is_multicast_ether_addr(addr))
+		return -EADDRNOTAVAIL;
 
 	/* update table with current entries */
-	for (vid = hw->mac.default_vid ? fm10k_find_next_vlan(interface, 0) : 1;
+	for (vid = hw->mac.default_vid ? fm10k_find_next_vlan(interface, 0) : 0;
 	     vid < VLAN_N_VID;
 	     vid = fm10k_find_next_vlan(interface, vid)) {
-		hw->mac.ops.update_mc_addr(hw, glort, addr, vid, sync);
+		err = hw->mac.ops.update_mc_addr(hw, glort, addr, vid, sync);
+		if (err)
+			return err;
 	}
 
 	return 0;
@@ -995,8 +986,11 @@ static void fm10k_set_rx_mode(struct net_device *dev)
 	}
 
 	/* synchronize all of the addresses */
-	__dev_uc_sync(dev, fm10k_uc_sync, fm10k_uc_unsync);
-	__dev_mc_sync(dev, fm10k_mc_sync, fm10k_mc_unsync);
+	if (xcast_mode != FM10K_XCAST_MODE_PROMISC) {
+		__dev_uc_sync(dev, fm10k_uc_sync, fm10k_uc_unsync);
+		if (xcast_mode != FM10K_XCAST_MODE_ALLMULTI)
+			__dev_mc_sync(dev, fm10k_mc_sync, fm10k_mc_unsync);
+	}
 
 	fm10k_mbx_unlock(interface);
 }
@@ -1007,6 +1001,21 @@ void fm10k_restore_rx_state(struct fm10k_intfc *interface)
 	struct fm10k_hw *hw = &interface->hw;
 	int xcast_mode;
 	u16 vid, glort;
+
+	/* restore our address if perm_addr is set */
+	if (hw->mac.type == fm10k_mac_vf) {
+		if (is_valid_ether_addr(hw->mac.perm_addr)) {
+			ether_addr_copy(hw->mac.addr, hw->mac.perm_addr);
+			ether_addr_copy(netdev->perm_addr, hw->mac.perm_addr);
+			ether_addr_copy(netdev->dev_addr, hw->mac.perm_addr);
+			netdev->addr_assign_type &= ~NET_ADDR_RANDOM;
+		}
+
+		if (hw->mac.vlan_override)
+			netdev->features &= ~NETIF_F_HW_VLAN_CTAG_RX;
+		else
+			netdev->features |= NETIF_F_HW_VLAN_CTAG_RX;
+	}
 
 	/* record glort for this interface */
 	glort = interface->glort;
@@ -1034,7 +1043,7 @@ void fm10k_restore_rx_state(struct fm10k_intfc *interface)
 	hw->mac.ops.update_vlan(hw, 0, 0, true);
 
 	/* update table with current entries */
-	for (vid = hw->mac.default_vid ? fm10k_find_next_vlan(interface, 0) : 1;
+	for (vid = hw->mac.default_vid ? fm10k_find_next_vlan(interface, 0) : 0;
 	     vid < VLAN_N_VID;
 	     vid = fm10k_find_next_vlan(interface, vid)) {
 		hw->mac.ops.update_vlan(hw, vid, 0, true);
@@ -1042,12 +1051,15 @@ void fm10k_restore_rx_state(struct fm10k_intfc *interface)
 					   vid, true, 0);
 	}
 
-	/* update xcast mode before synchronizing addresses */
+	/* update xcast mode before syncronizing addresses */
 	hw->mac.ops.update_xcast_mode(hw, glort, xcast_mode);
 
 	/* synchronize all of the addresses */
-	__dev_uc_sync(netdev, fm10k_uc_sync, fm10k_uc_unsync);
-	__dev_mc_sync(netdev, fm10k_mc_sync, fm10k_mc_unsync);
+	if (xcast_mode != FM10K_XCAST_MODE_PROMISC) {
+		__dev_uc_sync(netdev, fm10k_uc_sync, fm10k_uc_unsync);
+		if (xcast_mode != FM10K_XCAST_MODE_ALLMULTI)
+			__dev_mc_sync(netdev, fm10k_mc_sync, fm10k_mc_unsync);
+	}
 
 	fm10k_mbx_unlock(interface);
 
@@ -1140,7 +1152,6 @@ static struct rtnl_link_stats64 *fm10k_get_stats64(struct net_device *netdev,
 int fm10k_setup_tc(struct net_device *dev, u8 tc)
 {
 	struct fm10k_intfc *interface = netdev_priv(dev);
-	int err;
 
 	/* Currently only the PF supports priority classes */
 	if (tc && (interface->hw.mac.type != fm10k_mac_pf))
@@ -1165,39 +1176,29 @@ int fm10k_setup_tc(struct net_device *dev, u8 tc)
 	netdev_reset_tc(dev);
 	netdev_set_num_tc(dev, tc);
 
-	err = fm10k_init_queueing_scheme(interface);
-	if (err)
-		goto err_queueing_scheme;
+	fm10k_init_queueing_scheme(interface);
 
-	err = fm10k_mbx_request_irq(interface);
-	if (err)
-		goto err_mbx_irq;
+	fm10k_mbx_request_irq(interface);
 
-	err = netif_running(dev) ? fm10k_open(dev) : 0;
-	if (err)
-		goto err_open;
+	if (netif_running(dev))
+		fm10k_open(dev);
 
 	/* flag to indicate SWPRI has yet to be updated */
 	interface->flags |= FM10K_FLAG_SWPRI_CONFIG;
 
 	return 0;
-err_open:
-	fm10k_mbx_free_irq(interface);
-err_mbx_irq:
-	fm10k_clear_queueing_scheme(interface);
-err_queueing_scheme:
-	netif_device_detach(dev);
-
-	return err;
 }
 
-static int __fm10k_setup_tc(struct net_device *dev, u32 handle, __be16 proto,
-			    struct tc_to_netdev *tc)
+static int fm10k_ioctl(struct net_device *netdev, struct ifreq *ifr, int cmd)
 {
-	if (tc->type != TC_SETUP_MQPRIO)
-		return -EINVAL;
-
-	return fm10k_setup_tc(dev, tc->tc);
+	switch (cmd) {
+	case SIOCGHWTSTAMP:
+		return fm10k_get_ts_config(netdev, ifr);
+	case SIOCSHWTSTAMP:
+		return fm10k_set_ts_config(netdev, ifr);
+	default:
+		return -EOPNOTSUPP;
+	}
 }
 
 static void fm10k_assign_l2_accel(struct fm10k_intfc *interface,
@@ -1338,7 +1339,8 @@ static void fm10k_dfwd_del_station(struct net_device *dev, void *priv)
 	dglort.rss_l = fls(interface->ring_feature[RING_F_RSS].mask);
 	dglort.pc_l = fls(interface->ring_feature[RING_F_QOS].mask);
 	dglort.glort = interface->glort;
-	dglort.shared_l = fls(l2_accel->size);
+	if (l2_accel)
+		dglort.shared_l = fls(l2_accel->size);
 	hw->mac.ops.configure_dglort_map(hw, &dglort);
 
 	/* If table is empty remove it */
@@ -1355,7 +1357,7 @@ static netdev_features_t fm10k_features_check(struct sk_buff *skb,
 	if (!skb->encapsulation || fm10k_tx_encap_offload(skb))
 		return features;
 
-	return features & ~(NETIF_F_CSUM_MASK | NETIF_F_GSO_MASK);
+	return features & ~(NETIF_F_ALL_CSUM | NETIF_F_GSO_MASK);
 }
 
 static const struct net_device_ops fm10k_netdev_ops = {
@@ -1370,13 +1372,14 @@ static const struct net_device_ops fm10k_netdev_ops = {
 	.ndo_vlan_rx_kill_vid	= fm10k_vlan_rx_kill_vid,
 	.ndo_set_rx_mode	= fm10k_set_rx_mode,
 	.ndo_get_stats64	= fm10k_get_stats64,
-	.ndo_setup_tc		= __fm10k_setup_tc,
+	.ndo_setup_tc		= fm10k_setup_tc,
 	.ndo_set_vf_mac		= fm10k_ndo_set_vf_mac,
 	.ndo_set_vf_vlan	= fm10k_ndo_set_vf_vlan,
 	.ndo_set_vf_rate	= fm10k_ndo_set_vf_bw,
 	.ndo_get_vf_config	= fm10k_ndo_get_vf_config,
 	.ndo_add_vxlan_port	= fm10k_add_vxlan_port,
 	.ndo_del_vxlan_port	= fm10k_del_vxlan_port,
+	.ndo_do_ioctl		= fm10k_ioctl,
 	.ndo_dfwd_add_station	= fm10k_dfwd_add_station,
 	.ndo_dfwd_del_station	= fm10k_dfwd_del_station,
 #ifdef CONFIG_NET_POLL_CONTROLLER
@@ -1387,9 +1390,8 @@ static const struct net_device_ops fm10k_netdev_ops = {
 
 #define DEFAULT_DEBUG_LEVEL_SHIFT 3
 
-struct net_device *fm10k_alloc_netdev(const struct fm10k_info *info)
+struct net_device *fm10k_alloc_netdev(void)
 {
-	netdev_features_t hw_features;
 	struct fm10k_intfc *interface;
 	struct net_device *dev;
 
@@ -1403,7 +1405,7 @@ struct net_device *fm10k_alloc_netdev(const struct fm10k_info *info)
 
 	/* configure default debug level */
 	interface = netdev_priv(dev);
-	interface->msg_enable = BIT(DEFAULT_DEBUG_LEVEL_SHIFT) - 1;
+	interface->msg_enable = (1 << DEFAULT_DEBUG_LEVEL_SHIFT) - 1;
 
 	/* configure default features */
 	dev->features |= NETIF_F_IP_CSUM |
@@ -1412,30 +1414,26 @@ struct net_device *fm10k_alloc_netdev(const struct fm10k_info *info)
 			 NETIF_F_TSO |
 			 NETIF_F_TSO6 |
 			 NETIF_F_TSO_ECN |
+			 NETIF_F_GSO_UDP_TUNNEL |
 			 NETIF_F_RXHASH |
 			 NETIF_F_RXCSUM;
 
-	/* Only the PF can support VXLAN and NVGRE tunnel offloads */
-	if (info->mac == fm10k_mac_pf) {
-		dev->hw_enc_features = NETIF_F_IP_CSUM |
-				       NETIF_F_TSO |
-				       NETIF_F_TSO6 |
-				       NETIF_F_TSO_ECN |
-				       NETIF_F_GSO_UDP_TUNNEL |
-				       NETIF_F_IPV6_CSUM |
-				       NETIF_F_SG;
-
-		dev->features |= NETIF_F_GSO_UDP_TUNNEL;
-	}
-
 	/* all features defined to this point should be changeable */
-	hw_features = dev->features;
+	dev->hw_features |= dev->features;
 
 	/* allow user to enable L2 forwarding acceleration */
-	hw_features |= NETIF_F_HW_L2FW_DOFFLOAD;
+	dev->hw_features |= NETIF_F_HW_L2FW_DOFFLOAD;
 
 	/* configure VLAN features */
 	dev->vlan_features |= dev->features;
+
+	/* configure tunnel offloads */
+	dev->hw_enc_features |= NETIF_F_IP_CSUM |
+				NETIF_F_TSO |
+				NETIF_F_TSO6 |
+				NETIF_F_TSO_ECN |
+				NETIF_F_GSO_UDP_TUNNEL |
+				NETIF_F_IPV6_CSUM;
 
 	/* we want to leave these both on as we cannot disable VLAN tag
 	 * insertion or stripping on the hardware since it is contained
@@ -1446,8 +1444,6 @@ struct net_device *fm10k_alloc_netdev(const struct fm10k_info *info)
 			 NETIF_F_HW_VLAN_CTAG_FILTER;
 
 	dev->priv_flags |= IFF_UNICAST_FLT;
-
-	dev->hw_features |= hw_features;
 
 	return dev;
 }

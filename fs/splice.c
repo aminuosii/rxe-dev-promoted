@@ -88,7 +88,7 @@ out_unlock:
 static void page_cache_pipe_buf_release(struct pipe_inode_info *pipe,
 					struct pipe_buffer *buf)
 {
-	put_page(buf->page);
+	page_cache_release(buf->page);
 	buf->flags &= ~PIPE_BUF_FLAG_LRU;
 }
 
@@ -185,9 +185,6 @@ ssize_t splice_to_pipe(struct pipe_inode_info *pipe,
 	unsigned int spd_pages = spd->nr_pages;
 	int ret, do_wakeup, page_nr;
 
-	if (!spd_pages)
-		return 0;
-
 	ret = 0;
 	do_wakeup = 0;
 	page_nr = 0;
@@ -264,11 +261,10 @@ ssize_t splice_to_pipe(struct pipe_inode_info *pipe,
 
 	return ret;
 }
-EXPORT_SYMBOL_GPL(splice_to_pipe);
 
 void spd_release_page(struct splice_pipe_desc *spd, unsigned int i)
 {
-	put_page(spd->pages[i]);
+	page_cache_release(spd->pages[i]);
 }
 
 /*
@@ -328,9 +324,9 @@ __generic_file_splice_read(struct file *in, loff_t *ppos,
 	if (splice_grow_spd(pipe, &spd))
 		return -ENOMEM;
 
-	index = *ppos >> PAGE_SHIFT;
-	loff = *ppos & ~PAGE_MASK;
-	req_pages = (len + loff + PAGE_SIZE - 1) >> PAGE_SHIFT;
+	index = *ppos >> PAGE_CACHE_SHIFT;
+	loff = *ppos & ~PAGE_CACHE_MASK;
+	req_pages = (len + loff + PAGE_CACHE_SIZE - 1) >> PAGE_CACHE_SHIFT;
 	nr_pages = min(req_pages, spd.nr_pages_max);
 
 	/*
@@ -363,9 +359,9 @@ __generic_file_splice_read(struct file *in, loff_t *ppos,
 				break;
 
 			error = add_to_page_cache_lru(page, mapping, index,
-				   mapping_gfp_constraint(mapping, GFP_KERNEL));
+						GFP_KERNEL);
 			if (unlikely(error)) {
-				put_page(page);
+				page_cache_release(page);
 				if (error == -EEXIST)
 					continue;
 				break;
@@ -385,7 +381,7 @@ __generic_file_splice_read(struct file *in, loff_t *ppos,
 	 * Now loop over the map and see if we need to start IO on any
 	 * pages, fill in the partial map, etc.
 	 */
-	index = *ppos >> PAGE_SHIFT;
+	index = *ppos >> PAGE_CACHE_SHIFT;
 	nr_pages = spd.nr_pages;
 	spd.nr_pages = 0;
 	for (page_nr = 0; page_nr < nr_pages; page_nr++) {
@@ -397,7 +393,7 @@ __generic_file_splice_read(struct file *in, loff_t *ppos,
 		/*
 		 * this_len is the max we'll use from this page
 		 */
-		this_len = min_t(unsigned long, len, PAGE_SIZE - loff);
+		this_len = min_t(unsigned long, len, PAGE_CACHE_SIZE - loff);
 		page = spd.pages[page_nr];
 
 		if (PageReadahead(page))
@@ -418,7 +414,6 @@ __generic_file_splice_read(struct file *in, loff_t *ppos,
 			 */
 			if (!page->mapping) {
 				unlock_page(page);
-retry_lookup:
 				page = find_or_create_page(mapping, index,
 						mapping_gfp_mask(mapping));
 
@@ -426,7 +421,7 @@ retry_lookup:
 					error = -ENOMEM;
 					break;
 				}
-				put_page(spd.pages[page_nr]);
+				page_cache_release(spd.pages[page_nr]);
 				spd.pages[page_nr] = page;
 			}
 			/*
@@ -443,10 +438,13 @@ retry_lookup:
 			error = mapping->a_ops->readpage(in, page);
 			if (unlikely(error)) {
 				/*
-				 * Re-lookup the page
+				 * We really should re-lookup the page here,
+				 * but it complicates things a lot. Instead
+				 * lets just do what we already stored, and
+				 * we'll get it the next time we are called.
 				 */
 				if (error == AOP_TRUNCATED_PAGE)
-					goto retry_lookup;
+					error = 0;
 
 				break;
 			}
@@ -456,7 +454,7 @@ fill_it:
 		 * i_size must be checked after PageUptodate.
 		 */
 		isize = i_size_read(mapping->host);
-		end_index = (isize - 1) >> PAGE_SHIFT;
+		end_index = (isize - 1) >> PAGE_CACHE_SHIFT;
 		if (unlikely(!isize || index > end_index))
 			break;
 
@@ -470,7 +468,7 @@ fill_it:
 			/*
 			 * max good bytes in this page
 			 */
-			plen = ((isize - 1) & ~PAGE_MASK) + 1;
+			plen = ((isize - 1) & ~PAGE_CACHE_MASK) + 1;
 			if (plen <= loff)
 				break;
 
@@ -494,8 +492,8 @@ fill_it:
 	 * we got, 'nr_pages' is how many pages are in the map.
 	 */
 	while (page_nr < nr_pages)
-		put_page(spd.pages[page_nr++]);
-	in->f_ra.prev_pos = (loff_t)index << PAGE_SHIFT;
+		page_cache_release(spd.pages[page_nr++]);
+	in->f_ra.prev_pos = (loff_t)index << PAGE_CACHE_SHIFT;
 
 	if (spd.nr_pages)
 		error = splice_to_pipe(pipe, &spd);
@@ -580,7 +578,7 @@ static ssize_t kernel_readv(struct file *file, const struct iovec *vec,
 	old_fs = get_fs();
 	set_fs(get_ds());
 	/* The cast to a user pointer is valid due to the set_fs() */
-	res = vfs_readv(file, (const struct iovec __user *)vec, vlen, &pos, 0);
+	res = vfs_readv(file, (const struct iovec __user *)vec, vlen, &pos);
 	set_fs(old_fs);
 
 	return res;
@@ -636,8 +634,8 @@ ssize_t default_file_splice_read(struct file *in, loff_t *ppos,
 			goto shrink_ret;
 	}
 
-	offset = *ppos & ~PAGE_MASK;
-	nr_pages = (len + offset + PAGE_SIZE - 1) >> PAGE_SHIFT;
+	offset = *ppos & ~PAGE_CACHE_MASK;
+	nr_pages = (len + offset + PAGE_CACHE_SIZE - 1) >> PAGE_CACHE_SHIFT;
 
 	for (i = 0; i < nr_pages && i < spd.nr_pages_max && len; i++) {
 		struct page *page;
@@ -647,7 +645,7 @@ ssize_t default_file_splice_read(struct file *in, loff_t *ppos,
 		if (!page)
 			goto err;
 
-		this_len = min_t(size_t, len, PAGE_SIZE - offset);
+		this_len = min_t(size_t, len, PAGE_CACHE_SIZE - offset);
 		vec[i].iov_base = (void __user *) page_address(page);
 		vec[i].iov_len = this_len;
 		spd.pages[i] = page;
@@ -810,13 +808,6 @@ static int splice_from_pipe_feed(struct pipe_inode_info *pipe, struct splice_des
  */
 static int splice_from_pipe_next(struct pipe_inode_info *pipe, struct splice_desc *sd)
 {
-	/*
-	 * Check for signal early to make process killable when there are
-	 * always buffers available
-	 */
-	if (signal_pending(current))
-		return -ERESTARTSYS;
-
 	while (!pipe->nrbufs) {
 		if (!pipe->writers)
 			return 0;
@@ -892,7 +883,6 @@ ssize_t __splice_from_pipe(struct pipe_inode_info *pipe, struct splice_desc *sd,
 
 	splice_from_pipe_begin(sd);
 	do {
-		cond_resched();
 		ret = splice_from_pipe_next(pipe, sd);
 		if (ret > 0)
 			ret = splice_from_pipe_feed(pipe, sd, actor);
@@ -1143,9 +1133,6 @@ static long do_splice_to(struct file *in, loff_t *ppos,
 	if (unlikely(ret < 0))
 		return ret;
 
-	if (unlikely(len > MAX_RW_COUNT))
-		len = MAX_RW_COUNT;
-
 	if (in->f_op->splice_read)
 		splice_read = in->f_op->splice_read;
 	else
@@ -1174,7 +1161,7 @@ ssize_t splice_direct_to_actor(struct file *in, struct splice_desc *sd,
 	long ret, bytes;
 	umode_t i_mode;
 	size_t len;
-	int i, flags, more;
+	int i, flags;
 
 	/*
 	 * We require the input being a regular file, as we don't want to
@@ -1217,7 +1204,6 @@ ssize_t splice_direct_to_actor(struct file *in, struct splice_desc *sd,
 	 * Don't block on output, we have to drain the direct pipe.
 	 */
 	sd->flags &= ~SPLICE_F_NONBLOCK;
-	more = sd->flags & SPLICE_F_MORE;
 
 	while (len) {
 		size_t read_len;
@@ -1230,15 +1216,6 @@ ssize_t splice_direct_to_actor(struct file *in, struct splice_desc *sd,
 		read_len = ret;
 		sd->total_len = read_len;
 
-		/*
-		 * If more data is pending, set SPLICE_F_MORE
-		 * If this is the last data and SPLICE_F_MORE was not set
-		 * initially, clears it.
-		 */
-		if (read_len < len)
-			sd->flags |= SPLICE_F_MORE;
-		else if (!more)
-			sd->flags &= ~SPLICE_F_MORE;
 		/*
 		 * NOTE: nonblocking mode only applies to the input. We
 		 * must not do the output in nonblocking mode as then we

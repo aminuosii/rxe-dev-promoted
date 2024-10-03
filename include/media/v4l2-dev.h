@@ -65,6 +65,7 @@ struct v4l2_file_operations {
 	ssize_t (*read) (struct file *, char __user *, size_t, loff_t *);
 	ssize_t (*write) (struct file *, const char __user *, size_t, loff_t *);
 	unsigned int (*poll) (struct file *, struct poll_table_struct *);
+	long (*ioctl) (struct file *, unsigned int, unsigned long);
 	long (*unlocked_ioctl) (struct file *, unsigned int, unsigned long);
 #ifdef CONFIG_COMPAT
 	long (*compat_ioctl32) (struct file *, unsigned int, unsigned long);
@@ -86,14 +87,9 @@ struct video_device
 {
 #if defined(CONFIG_MEDIA_CONTROLLER)
 	struct media_entity entity;
-	struct media_intf_devnode *intf_devnode;
-	struct media_pipeline pipe;
 #endif
 	/* device ops */
 	const struct v4l2_file_operations *fops;
-
-	/* device capabilities as used in v4l2_capabilities */
-	u32 device_caps;
 
 	/* sysfs */
 	struct device dev;		/* v4l device */

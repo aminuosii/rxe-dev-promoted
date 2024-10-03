@@ -341,11 +341,13 @@ extern unsigned long __strnlen_user (const char __user *, long);
 	__su_ret;						\
 })
 
-#define ARCH_HAS_RELATIVE_EXTABLE
+/* Generic code can't deal with the location-relative format that we use for compactness.  */
+#define ARCH_HAS_SORT_EXTABLE
+#define ARCH_HAS_SEARCH_EXTABLE
 
 struct exception_table_entry {
-	int insn;	/* location-relative address of insn this fixup is for */
-	int fixup;	/* location-relative continuation addr.; if bit 2 is set, r9 is set to 0 */
+	int addr;	/* location-relative address of insn this fixup is for */
+	int cont;	/* location-relative continuation addr.; if bit 2 is set, r9 is set to 0 */
 };
 
 extern void ia64_handle_exception (struct pt_regs *regs, const struct exception_table_entry *e);

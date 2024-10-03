@@ -15,6 +15,7 @@
 #include <linux/export.h>
 #include <linux/log2.h>
 #include <linux/of_device.h>
+#include <linux/hash.h>
 #include <linux/iommu-common.h>
 
 #include <asm/iommu.h>
@@ -29,6 +30,7 @@
 
 #define DRIVER_NAME	"pci_sun4v"
 #define PFX		DRIVER_NAME ": "
+static DEFINE_PER_CPU(unsigned int, iommu_pool_hash);
 
 static unsigned long vpci_major = 1;
 static unsigned long vpci_minor = 1;
@@ -157,12 +159,13 @@ static void *dma_4v_alloc_coherent(struct device *dev, size_t size,
 	iommu = dev->archdata.iommu;
 
 	entry = iommu_tbl_range_alloc(dev, &iommu->tbl, npages, NULL,
-				      (unsigned long)(-1), 0);
+				      __this_cpu_read(iommu_pool_hash));
 
-	if (unlikely(entry == IOMMU_ERROR_CODE))
+	if (unlikely(entry == DMA_ERROR_CODE))
 		goto range_alloc_fail;
 
-	*dma_addrp = (iommu->tbl.table_map_base + (entry << IO_PAGE_SHIFT));
+	*dma_addrp = (iommu->tbl.page_table_map_base +
+		      (entry << IO_PAGE_SHIFT));
 	ret = (void *) first_page;
 	first_page = __pa(first_page);
 
@@ -187,7 +190,7 @@ static void *dma_4v_alloc_coherent(struct device *dev, size_t size,
 	return ret;
 
 iommu_map_fail:
-	iommu_tbl_range_free(&iommu->tbl, *dma_addrp, npages, IOMMU_ERROR_CODE);
+	iommu_tbl_range_free(&iommu->tbl, *dma_addrp, npages, false, NULL);
 
 range_alloc_fail:
 	free_pages(first_page, order);
@@ -224,9 +227,9 @@ static void dma_4v_free_coherent(struct device *dev, size_t size, void *cpu,
 	iommu = dev->archdata.iommu;
 	pbm = dev->archdata.host_controller;
 	devhandle = pbm->devhandle;
-	entry = ((dvma - iommu->tbl.table_map_base) >> IO_PAGE_SHIFT);
+	entry = ((dvma - iommu->tbl.page_table_map_base) >> IO_PAGE_SHIFT);
 	dma_4v_iommu_demap(&devhandle, entry, npages);
-	iommu_tbl_range_free(&iommu->tbl, dvma, npages, IOMMU_ERROR_CODE);
+	iommu_tbl_range_free(&iommu->tbl, dvma, npages, false, NULL);
 	order = get_order(size);
 	if (order < 10)
 		free_pages((unsigned long)cpu, order);
@@ -254,12 +257,13 @@ static dma_addr_t dma_4v_map_page(struct device *dev, struct page *page,
 	npages >>= IO_PAGE_SHIFT;
 
 	entry = iommu_tbl_range_alloc(dev, &iommu->tbl, npages, NULL,
-				      (unsigned long)(-1), 0);
+				      __this_cpu_read(iommu_pool_hash));
 
-	if (unlikely(entry == IOMMU_ERROR_CODE))
+	if (unlikely(entry == DMA_ERROR_CODE))
 		goto bad;
 
-	bus_addr = (iommu->tbl.table_map_base + (entry << IO_PAGE_SHIFT));
+	bus_addr = (iommu->tbl.page_table_map_base +
+		    (entry << IO_PAGE_SHIFT));
 	ret = bus_addr | (oaddr & ~IO_PAGE_MASK);
 	base_paddr = __pa(oaddr & IO_PAGE_MASK);
 	prot = HV_PCI_MAP_ATTR_READ;
@@ -288,7 +292,7 @@ bad:
 	return DMA_ERROR_CODE;
 
 iommu_map_fail:
-	iommu_tbl_range_free(&iommu->tbl, bus_addr, npages, IOMMU_ERROR_CODE);
+	iommu_tbl_range_free(&iommu->tbl, bus_addr, npages, false, NULL);
 	return DMA_ERROR_CODE;
 }
 
@@ -315,9 +319,9 @@ static void dma_4v_unmap_page(struct device *dev, dma_addr_t bus_addr,
 	npages = IO_PAGE_ALIGN(bus_addr + sz) - (bus_addr & IO_PAGE_MASK);
 	npages >>= IO_PAGE_SHIFT;
 	bus_addr &= IO_PAGE_MASK;
-	entry = (bus_addr - iommu->tbl.table_map_base) >> IO_PAGE_SHIFT;
+	entry = (bus_addr - iommu->tbl.page_table_map_base) >> IO_PAGE_SHIFT;
 	dma_4v_iommu_demap(&devhandle, entry, npages);
-	iommu_tbl_range_free(&iommu->tbl, bus_addr, npages, IOMMU_ERROR_CODE);
+	iommu_tbl_range_free(&iommu->tbl, bus_addr, npages, false, NULL);
 }
 
 static int dma_4v_map_sg(struct device *dev, struct scatterlist *sglist,
@@ -359,7 +363,7 @@ static int dma_4v_map_sg(struct device *dev, struct scatterlist *sglist,
 	max_seg_size = dma_get_max_seg_size(dev);
 	seg_boundary_size = ALIGN(dma_get_seg_boundary(dev) + 1,
 				  IO_PAGE_SIZE) >> IO_PAGE_SHIFT;
-	base_shift = iommu->tbl.table_map_base >> IO_PAGE_SHIFT;
+	base_shift = iommu->tbl.page_table_map_base >> IO_PAGE_SHIFT;
 	for_each_sg(sglist, s, nelems, i) {
 		unsigned long paddr, npages, entry, out_entry = 0, slen;
 
@@ -372,11 +376,11 @@ static int dma_4v_map_sg(struct device *dev, struct scatterlist *sglist,
 		/* Allocate iommu entries for that segment */
 		paddr = (unsigned long) SG_ENT_PHYS_ADDRESS(s);
 		npages = iommu_num_pages(paddr, slen, IO_PAGE_SIZE);
-		entry = iommu_tbl_range_alloc(dev, &iommu->tbl, npages,
-					      &handle, (unsigned long)(-1), 0);
+		entry = iommu_tbl_range_alloc(dev, &iommu->tbl, npages, &handle,
+				      __this_cpu_read(iommu_pool_hash));
 
 		/* Handle failure */
-		if (unlikely(entry == IOMMU_ERROR_CODE)) {
+		if (unlikely(entry == DMA_ERROR_CODE)) {
 			if (printk_ratelimit())
 				printk(KERN_INFO "iommu_alloc failed, iommu %p paddr %lx"
 				       " npages %lx\n", iommu, paddr, npages);
@@ -386,7 +390,8 @@ static int dma_4v_map_sg(struct device *dev, struct scatterlist *sglist,
 		iommu_batch_new_entry(entry);
 
 		/* Convert entry to a dma_addr_t */
-		dma_addr = iommu->tbl.table_map_base + (entry << IO_PAGE_SHIFT);
+		dma_addr = iommu->tbl.page_table_map_base +
+			(entry << IO_PAGE_SHIFT);
 		dma_addr |= (s->offset & ~IO_PAGE_MASK);
 
 		/* Insert into HW table */
@@ -451,7 +456,7 @@ iommu_map_failed:
 			npages = iommu_num_pages(s->dma_address, s->dma_length,
 						 IO_PAGE_SIZE);
 			iommu_tbl_range_free(&iommu->tbl, vaddr, npages,
-					     IOMMU_ERROR_CODE);
+					     false, NULL);
 			/* XXX demap? XXX */
 			s->dma_address = DMA_ERROR_CODE;
 			s->dma_length = 0;
@@ -487,16 +492,16 @@ static void dma_4v_unmap_sg(struct device *dev, struct scatterlist *sglist,
 		dma_addr_t dma_handle = sg->dma_address;
 		unsigned int len = sg->dma_length;
 		unsigned long npages;
-		struct iommu_map_table *tbl = &iommu->tbl;
+		struct iommu_table *tbl = &iommu->tbl;
 		unsigned long shift = IO_PAGE_SHIFT;
 
 		if (!len)
 			break;
 		npages = iommu_num_pages(dma_handle, len, IO_PAGE_SIZE);
-		entry = ((dma_handle - tbl->table_map_base) >> shift);
+		entry = ((dma_handle - tbl->page_table_map_base) >> shift);
 		dma_4v_iommu_demap(&devhandle, entry, npages);
 		iommu_tbl_range_free(&iommu->tbl, dma_handle, npages,
-				     IOMMU_ERROR_CODE);
+				     false, NULL);
 		sg = sg_next(sg);
 	}
 
@@ -512,6 +517,8 @@ static struct dma_map_ops sun4v_dma_ops = {
 	.unmap_sg			= dma_4v_unmap_sg,
 };
 
+static struct iommu_tbl_ops dma_4v_iommu_ops;
+
 static void pci_sun4v_scan_bus(struct pci_pbm_info *pbm, struct device *parent)
 {
 	struct property *prop;
@@ -526,7 +533,7 @@ static void pci_sun4v_scan_bus(struct pci_pbm_info *pbm, struct device *parent)
 }
 
 static unsigned long probe_existing_entries(struct pci_pbm_info *pbm,
-					    struct iommu_map_table *iommu)
+					    struct iommu_table *iommu)
 {
 	struct iommu_pool *pool;
 	unsigned long i, pool_nr, cnt = 0;
@@ -534,7 +541,7 @@ static unsigned long probe_existing_entries(struct pci_pbm_info *pbm,
 
 	devhandle = pbm->devhandle;
 	for (pool_nr = 0; pool_nr < iommu->nr_pools; pool_nr++) {
-		pool = &(iommu->pools[pool_nr]);
+		pool = &(iommu->arena_pool[pool_nr]);
 		for (i = pool->start; i <= pool->end; i++) {
 			unsigned long ret, io_attrs, ra;
 
@@ -580,9 +587,8 @@ static int pci_sun4v_iommu_init(struct pci_pbm_info *pbm)
 	dma_offset = vdma[0];
 
 	/* Setup initial software IOMMU state. */
-	spin_lock_init(&iommu->lock);
 	iommu->ctx_lowest_free = 1;
-	iommu->tbl.table_map_base = dma_offset;
+	iommu->tbl.page_table_map_base = dma_offset;
 	iommu->dma_addr_mask = dma_mask;
 
 	/* Allocate and initialize the free area map.  */
@@ -594,9 +600,8 @@ static int pci_sun4v_iommu_init(struct pci_pbm_info *pbm)
 		return -ENOMEM;
 	}
 	iommu_tbl_pool_init(&iommu->tbl, num_tsb_entries, IO_PAGE_SHIFT,
-			    NULL, false /* no large_pool */,
-			    0 /* default npools */,
-			    false /* want span boundary checking */);
+			    &dma_4v_iommu_ops, false /* no large_pool */,
+			    0 /* default npools */);
 	sz = probe_existing_entries(pbm, &iommu->tbl);
 	if (sz)
 		printk("%s: Imported %lu TSB entries from OBP\n",
@@ -996,8 +1001,17 @@ static struct platform_driver pci_sun4v_driver = {
 	.probe		= pci_sun4v_probe,
 };
 
+static void setup_iommu_pool_hash(void)
+{
+	unsigned int i;
+
+	for_each_possible_cpu(i)
+		per_cpu(iommu_pool_hash, i) = hash_32(i, IOMMU_POOL_HASHBITS);
+}
+
 static int __init pci_sun4v_init(void)
 {
+	setup_iommu_pool_hash();
 	return platform_driver_register(&pci_sun4v_driver);
 }
 

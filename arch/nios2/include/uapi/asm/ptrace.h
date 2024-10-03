@@ -14,8 +14,6 @@
 
 #ifndef __ASSEMBLY__
 
-#include <linux/types.h>
-
 /*
  * Register numbers used by 'ptrace' system call interface.
  */

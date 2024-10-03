@@ -346,7 +346,7 @@ const struct file_operations omfs_file_operations = {
 
 static int omfs_setattr(struct dentry *dentry, struct iattr *attr)
 {
-	struct inode *inode = d_inode(dentry);
+	struct inode *inode = dentry->d_inode;
 	int error;
 
 	error = inode_change_ok(inode, attr);

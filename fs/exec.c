@@ -56,7 +56,6 @@
 #include <linux/pipe_fs_i.h>
 #include <linux/oom.h>
 #include <linux/compat.h>
-#include <linux/vmalloc.h>
 
 #include <asm/uaccess.h>
 #include <asm/mmu_context.h>
@@ -99,12 +98,6 @@ static inline void put_binfmt(struct linux_binfmt * fmt)
 	module_put(fmt->module);
 }
 
-bool path_noexec(const struct path *path)
-{
-	return (path->mnt->mnt_flags & MNT_NOEXEC) ||
-	       (path->mnt->mnt_sb->s_iflags & SB_I_NOEXEC);
-}
-
 #ifdef CONFIG_USELIB
 /*
  * Note that a shared library must be both readable and executable due to
@@ -120,7 +113,7 @@ SYSCALL_DEFINE1(uselib, const char __user *, library)
 	int error = PTR_ERR(tmp);
 	static const struct open_flags uselib_flags = {
 		.open_flag = O_LARGEFILE | O_RDONLY | __FMODE_EXEC,
-		.acc_mode = MAY_READ | MAY_EXEC,
+		.acc_mode = MAY_READ | MAY_EXEC | MAY_OPEN,
 		.intent = LOOKUP_OPEN,
 		.lookup_flags = LOOKUP_FOLLOW,
 	};
@@ -139,7 +132,7 @@ SYSCALL_DEFINE1(uselib, const char __user *, library)
 		goto exit;
 
 	error = -EACCES;
-	if (path_noexec(&file->f_path))
+	if (file->f_path.mnt->mnt_flags & MNT_NOEXEC)
 		goto exit;
 
 	fsnotify_open(file);
@@ -199,12 +192,8 @@ static struct page *get_arg_page(struct linux_binprm *bprm, unsigned long pos,
 			return NULL;
 	}
 #endif
-	/*
-	 * We are doing an exec().  'current' is the process
-	 * doing the exec and bprm->mm is the new process's mm.
-	 */
-	ret = get_user_pages_remote(current, bprm->mm, pos, 1, write,
-			1, &page, NULL);
+	ret = get_user_pages(current, bprm->mm, pos,
+			1, write, 1, &page, NULL);
 	if (ret <= 0)
 		return NULL;
 
@@ -243,6 +232,10 @@ static void put_arg_page(struct page *page)
 	put_page(page);
 }
 
+static void free_arg_page(struct linux_binprm *bprm, int i)
+{
+}
+
 static void free_arg_pages(struct linux_binprm *bprm)
 {
 }
@@ -263,10 +256,7 @@ static int __bprm_mm_init(struct linux_binprm *bprm)
 	if (!vma)
 		return -ENOMEM;
 
-	if (down_write_killable(&mm->mmap_sem)) {
-		err = -EINTR;
-		goto err_free;
-	}
+	down_write(&mm->mmap_sem);
 	vma->vm_mm = mm;
 
 	/*
@@ -293,7 +283,6 @@ static int __bprm_mm_init(struct linux_binprm *bprm)
 	return 0;
 err:
 	up_write(&mm->mmap_sem);
-err_free:
 	bprm->vma = NULL;
 	kmem_cache_free(vm_area_cachep, vma);
 	return err;
@@ -670,9 +659,6 @@ int setup_arg_pages(struct linux_binprm *bprm,
 	if (stack_base > STACK_SIZE_MAX)
 		stack_base = STACK_SIZE_MAX;
 
-	/* Add space for stack randomization. */
-	stack_base += (STACK_RND_MASK << PAGE_SHIFT);
-
 	/* Make sure we didn't let the argument array grow too large. */
 	if (vma->vm_end - vma->vm_start > stack_base)
 		return -ENOMEM;
@@ -700,9 +686,7 @@ int setup_arg_pages(struct linux_binprm *bprm,
 		bprm->loader -= stack_shift;
 	bprm->exec -= stack_shift;
 
-	if (down_write_killable(&mm->mmap_sem))
-		return -EINTR;
-
+	down_write(&mm->mmap_sem);
 	vm_flags = VM_STACK_FLAGS;
 
 	/*
@@ -770,7 +754,7 @@ static struct file *do_open_execat(int fd, struct filename *name, int flags)
 	int err;
 	struct open_flags open_exec_flags = {
 		.open_flag = O_LARGEFILE | O_RDONLY | __FMODE_EXEC,
-		.acc_mode = MAY_EXEC,
+		.acc_mode = MAY_EXEC | MAY_OPEN,
 		.intent = LOOKUP_OPEN,
 		.lookup_flags = LOOKUP_FOLLOW,
 	};
@@ -790,7 +774,7 @@ static struct file *do_open_execat(int fd, struct filename *name, int flags)
 	if (!S_ISREG(file_inode(file)->i_mode))
 		goto exit;
 
-	if (path_noexec(&file->f_path))
+	if (file->f_path.mnt->mnt_flags & MNT_NOEXEC)
 		goto exit;
 
 	err = deny_write_access(file);
@@ -837,110 +821,6 @@ int kernel_read(struct file *file, loff_t offset,
 }
 
 EXPORT_SYMBOL(kernel_read);
-
-int kernel_read_file(struct file *file, void **buf, loff_t *size,
-		     loff_t max_size, enum kernel_read_file_id id)
-{
-	loff_t i_size, pos;
-	ssize_t bytes = 0;
-	int ret;
-
-	if (!S_ISREG(file_inode(file)->i_mode) || max_size < 0)
-		return -EINVAL;
-
-	ret = security_kernel_read_file(file, id);
-	if (ret)
-		return ret;
-
-	ret = deny_write_access(file);
-	if (ret)
-		return ret;
-
-	i_size = i_size_read(file_inode(file));
-	if (max_size > 0 && i_size > max_size) {
-		ret = -EFBIG;
-		goto out;
-	}
-	if (i_size <= 0) {
-		ret = -EINVAL;
-		goto out;
-	}
-
-	*buf = vmalloc(i_size);
-	if (!*buf) {
-		ret = -ENOMEM;
-		goto out;
-	}
-
-	pos = 0;
-	while (pos < i_size) {
-		bytes = kernel_read(file, pos, (char *)(*buf) + pos,
-				    i_size - pos);
-		if (bytes < 0) {
-			ret = bytes;
-			goto out;
-		}
-
-		if (bytes == 0)
-			break;
-		pos += bytes;
-	}
-
-	if (pos != i_size) {
-		ret = -EIO;
-		goto out_free;
-	}
-
-	ret = security_kernel_post_read_file(file, *buf, i_size, id);
-	if (!ret)
-		*size = pos;
-
-out_free:
-	if (ret < 0) {
-		vfree(*buf);
-		*buf = NULL;
-	}
-
-out:
-	allow_write_access(file);
-	return ret;
-}
-EXPORT_SYMBOL_GPL(kernel_read_file);
-
-int kernel_read_file_from_path(char *path, void **buf, loff_t *size,
-			       loff_t max_size, enum kernel_read_file_id id)
-{
-	struct file *file;
-	int ret;
-
-	if (!path || !*path)
-		return -EINVAL;
-
-	file = filp_open(path, O_RDONLY, 0);
-	if (IS_ERR(file))
-		return PTR_ERR(file);
-
-	ret = kernel_read_file(file, buf, size, max_size, id);
-	fput(file);
-	return ret;
-}
-EXPORT_SYMBOL_GPL(kernel_read_file_from_path);
-
-int kernel_read_file_from_fd(int fd, void **buf, loff_t *size, loff_t max_size,
-			     enum kernel_read_file_id id)
-{
-	struct fd f = fdget(fd);
-	int ret = -EBADF;
-
-	if (!f.file)
-		goto out;
-
-	ret = kernel_read_file(f.file, buf, size, max_size, id);
-out:
-	fdput(f);
-	return ret;
-}
-EXPORT_SYMBOL_GPL(kernel_read_file_from_fd);
 
 ssize_t read_code(struct file *file, unsigned long addr, loff_t pos, size_t len)
 {
@@ -1395,58 +1275,6 @@ static void check_unsafe_exec(struct linux_binprm *bprm)
 	spin_unlock(&p->fs->lock);
 }
 
-static void bprm_fill_uid(struct linux_binprm *bprm)
-{
-	struct inode *inode;
-	unsigned int mode;
-	kuid_t uid;
-	kgid_t gid;
-
-	/*
-	 * Since this can be called multiple times (via prepare_binprm),
-	 * we must clear any previous work done when setting set[ug]id
-	 * bits from any earlier bprm->file uses (for example when run
-	 * first for a setuid script then again for its interpreter).
-	 */
-	bprm->cred->euid = current_euid();
-	bprm->cred->egid = current_egid();
-
-	if (bprm->file->f_path.mnt->mnt_flags & MNT_NOSUID)
-		return;
-
-	if (task_no_new_privs(current))
-		return;
-
-	inode = file_inode(bprm->file);
-	mode = READ_ONCE(inode->i_mode);
-	if (!(mode & (S_ISUID|S_ISGID)))
-		return;
-
-	/* Be careful if suid/sgid is set */
-	inode_lock(inode);
-
-	/* reload atomically mode/uid/gid now that lock held */
-	mode = inode->i_mode;
-	uid = inode->i_uid;
-	gid = inode->i_gid;
-	inode_unlock(inode);
-
-	/* We ignore suid/sgid if there are no mappings for them in the ns */
-	if (!kuid_has_mapping(bprm->cred->user_ns, uid) ||
-		 !kgid_has_mapping(bprm->cred->user_ns, gid))
-		return;
-
-	if (mode & S_ISUID) {
-		bprm->per_clear |= PER_CLEAR_ON_SETID;
-		bprm->cred->euid = uid;
-	}
-
-	if ((mode & (S_ISGID | S_IXGRP)) == (S_ISGID | S_IXGRP)) {
-		bprm->per_clear |= PER_CLEAR_ON_SETID;
-		bprm->cred->egid = gid;
-	}
-}
-
 /*
  * Fill the binprm structure from the inode.
  * Check permissions, then read the first 128 (BINPRM_BUF_SIZE) bytes
@@ -1455,9 +1283,36 @@ static void bprm_fill_uid(struct linux_binprm *bprm)
  */
 int prepare_binprm(struct linux_binprm *bprm)
 {
+	struct inode *inode = file_inode(bprm->file);
+	umode_t mode = inode->i_mode;
 	int retval;
 
-	bprm_fill_uid(bprm);
+
+	/* clear any previous set[ug]id data from a previous binary */
+	bprm->cred->euid = current_euid();
+	bprm->cred->egid = current_egid();
+
+	if (!(bprm->file->f_path.mnt->mnt_flags & MNT_NOSUID) &&
+	    !task_no_new_privs(current) &&
+	    kuid_has_mapping(bprm->cred->user_ns, inode->i_uid) &&
+	    kgid_has_mapping(bprm->cred->user_ns, inode->i_gid)) {
+		/* Set-uid? */
+		if (mode & S_ISUID) {
+			bprm->per_clear |= PER_CLEAR_ON_SETID;
+			bprm->cred->euid = inode->i_uid;
+		}
+
+		/* Set-gid? */
+		/*
+		 * If setgid is set but no group execute bit then this
+		 * is a candidate for mandatory locking, not a setgid
+		 * executable.
+		 */
+		if ((mode & (S_ISGID | S_IXGRP)) == (S_ISGID | S_IXGRP)) {
+			bprm->per_clear |= PER_CLEAR_ON_SETID;
+			bprm->cred->egid = inode->i_gid;
+		}
+	}
 
 	/* fill in binprm security blob */
 	retval = security_bprm_set_creds(bprm);
@@ -1501,6 +1356,9 @@ int remove_arg_zero(struct linux_binprm *bprm)
 
 		kunmap_atomic(kaddr);
 		put_arg_page(page);
+
+		if (offset == PAGE_SIZE)
+			free_arg_page(bprm, (bprm->p >> PAGE_SHIFT) - 1);
 	} while (offset == PAGE_SIZE);
 
 	bprm->p++;

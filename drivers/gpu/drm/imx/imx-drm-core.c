@@ -17,6 +17,7 @@
 #include <linux/device.h>
 #include <linux/fb.h>
 #include <linux/module.h>
+#include <linux/of_graph.h>
 #include <linux/platform_device.h>
 #include <drm/drmP.h>
 #include <drm/drm_fb_helper.h>
@@ -25,7 +26,6 @@
 #include <drm/drm_fb_cma_helper.h>
 #include <drm/drm_plane_helper.h>
 #include <drm/drm_of.h>
-#include <video/imx-ipu-v3.h>
 
 #include "imx-drm.h"
 
@@ -39,41 +39,47 @@ struct imx_drm_component {
 struct imx_drm_device {
 	struct drm_device			*drm;
 	struct imx_drm_crtc			*crtc[MAX_CRTC];
-	unsigned int				pipes;
+	int					pipes;
 	struct drm_fbdev_cma			*fbhelper;
 };
 
 struct imx_drm_crtc {
 	struct drm_crtc				*crtc;
+	int					pipe;
 	struct imx_drm_crtc_helper_funcs	imx_drm_helper_funcs;
 };
 
-#if IS_ENABLED(CONFIG_DRM_FBDEV_EMULATION)
 static int legacyfb_depth = 16;
 module_param(legacyfb_depth, int, 0444);
-#endif
 
-unsigned int imx_drm_crtc_id(struct imx_drm_crtc *crtc)
+int imx_drm_crtc_id(struct imx_drm_crtc *crtc)
 {
-	return drm_crtc_index(crtc->crtc);
+	return crtc->pipe;
 }
 EXPORT_SYMBOL_GPL(imx_drm_crtc_id);
 
 static void imx_drm_driver_lastclose(struct drm_device *drm)
 {
+#if IS_ENABLED(CONFIG_DRM_IMX_FB_HELPER)
 	struct imx_drm_device *imxdrm = drm->dev_private;
 
-	drm_fbdev_cma_restore_mode(imxdrm->fbhelper);
+	if (imxdrm->fbhelper)
+		drm_fbdev_cma_restore_mode(imxdrm->fbhelper);
+#endif
 }
 
 static int imx_drm_driver_unload(struct drm_device *drm)
 {
+#if IS_ENABLED(CONFIG_DRM_IMX_FB_HELPER)
 	struct imx_drm_device *imxdrm = drm->dev_private;
+#endif
 
 	drm_kms_helper_poll_fini(drm);
 
+#if IS_ENABLED(CONFIG_DRM_IMX_FB_HELPER)
 	if (imxdrm->fbhelper)
 		drm_fbdev_cma_fini(imxdrm->fbhelper);
+#endif
 
 	component_unbind_all(drm->dev, drm);
 
@@ -97,8 +103,8 @@ static struct imx_drm_crtc *imx_drm_find_crtc(struct drm_crtc *crtc)
 	return NULL;
 }
 
-int imx_drm_set_bus_config(struct drm_encoder *encoder, u32 bus_format,
-		int hsync_pin, int vsync_pin, u32 bus_flags)
+int imx_drm_panel_format_pins(struct drm_encoder *encoder,
+		u32 interface_pix_fmt, int hsync_pin, int vsync_pin)
 {
 	struct imx_drm_crtc_helper_funcs *helper;
 	struct imx_drm_crtc *imx_crtc;
@@ -110,42 +116,39 @@ int imx_drm_set_bus_config(struct drm_encoder *encoder, u32 bus_format,
 	helper = &imx_crtc->imx_drm_helper_funcs;
 	if (helper->set_interface_pix_fmt)
 		return helper->set_interface_pix_fmt(encoder->crtc,
-					bus_format, hsync_pin, vsync_pin,
-					bus_flags);
+				interface_pix_fmt, hsync_pin, vsync_pin);
 	return 0;
 }
-EXPORT_SYMBOL_GPL(imx_drm_set_bus_config);
+EXPORT_SYMBOL_GPL(imx_drm_panel_format_pins);
 
-int imx_drm_set_bus_format(struct drm_encoder *encoder, u32 bus_format)
+int imx_drm_panel_format(struct drm_encoder *encoder, u32 interface_pix_fmt)
 {
-	return imx_drm_set_bus_config(encoder, bus_format, 2, 3,
-				      DRM_BUS_FLAG_DE_HIGH |
-				      DRM_BUS_FLAG_PIXDATA_NEGEDGE);
+	return imx_drm_panel_format_pins(encoder, interface_pix_fmt, 2, 3);
 }
-EXPORT_SYMBOL_GPL(imx_drm_set_bus_format);
+EXPORT_SYMBOL_GPL(imx_drm_panel_format);
 
 int imx_drm_crtc_vblank_get(struct imx_drm_crtc *imx_drm_crtc)
 {
-	return drm_crtc_vblank_get(imx_drm_crtc->crtc);
+	return drm_vblank_get(imx_drm_crtc->crtc->dev, imx_drm_crtc->pipe);
 }
 EXPORT_SYMBOL_GPL(imx_drm_crtc_vblank_get);
 
 void imx_drm_crtc_vblank_put(struct imx_drm_crtc *imx_drm_crtc)
 {
-	drm_crtc_vblank_put(imx_drm_crtc->crtc);
+	drm_vblank_put(imx_drm_crtc->crtc->dev, imx_drm_crtc->pipe);
 }
 EXPORT_SYMBOL_GPL(imx_drm_crtc_vblank_put);
 
 void imx_drm_handle_vblank(struct imx_drm_crtc *imx_drm_crtc)
 {
-	drm_crtc_handle_vblank(imx_drm_crtc->crtc);
+	drm_handle_vblank(imx_drm_crtc->crtc->dev, imx_drm_crtc->pipe);
 }
 EXPORT_SYMBOL_GPL(imx_drm_handle_vblank);
 
-static int imx_drm_enable_vblank(struct drm_device *drm, unsigned int pipe)
+static int imx_drm_enable_vblank(struct drm_device *drm, int crtc)
 {
 	struct imx_drm_device *imxdrm = drm->dev_private;
-	struct imx_drm_crtc *imx_drm_crtc = imxdrm->crtc[pipe];
+	struct imx_drm_crtc *imx_drm_crtc = imxdrm->crtc[crtc];
 	int ret;
 
 	if (!imx_drm_crtc)
@@ -160,10 +163,10 @@ static int imx_drm_enable_vblank(struct drm_device *drm, unsigned int pipe)
 	return ret;
 }
 
-static void imx_drm_disable_vblank(struct drm_device *drm, unsigned int pipe)
+static void imx_drm_disable_vblank(struct drm_device *drm, int crtc)
 {
 	struct imx_drm_device *imxdrm = drm->dev_private;
-	struct imx_drm_crtc *imx_drm_crtc = imxdrm->crtc[pipe];
+	struct imx_drm_crtc *imx_drm_crtc = imxdrm->crtc[crtc];
 
 	if (!imx_drm_crtc)
 		return;
@@ -172,6 +175,18 @@ static void imx_drm_disable_vblank(struct drm_device *drm, unsigned int pipe)
 		return;
 
 	imx_drm_crtc->imx_drm_helper_funcs.disable_vblank(imx_drm_crtc->crtc);
+}
+
+static void imx_drm_driver_preclose(struct drm_device *drm,
+		struct drm_file *file)
+{
+	int i;
+
+	if (!file->is_master)
+		return;
+
+	for (i = 0; i < MAX_CRTC; i++)
+		imx_drm_disable_vblank(drm, i);
 }
 
 static const struct file_operations imx_drm_driver_fops = {
@@ -200,12 +215,14 @@ EXPORT_SYMBOL_GPL(imx_drm_encoder_destroy);
 
 static void imx_drm_output_poll_changed(struct drm_device *drm)
 {
+#if IS_ENABLED(CONFIG_DRM_IMX_FB_HELPER)
 	struct imx_drm_device *imxdrm = drm->dev_private;
 
 	drm_fbdev_cma_hotplug_event(imxdrm->fbhelper);
+#endif
 }
 
-static const struct drm_mode_config_funcs imx_drm_mode_config_funcs = {
+static struct drm_mode_config_funcs imx_drm_mode_config_funcs = {
 	.fb_create = drm_fb_cma_create,
 	.output_poll_changed = imx_drm_output_poll_changed,
 };
@@ -256,6 +273,13 @@ static int imx_drm_driver_load(struct drm_device *drm, unsigned long flags)
 	if (ret)
 		goto err_kms;
 
+	/*
+	 * with vblank_disable_allowed = true, vblank interrupt will be
+	 * disabled by drm timer once a current process gives up ownership
+	 * of vblank event. (after drm_vblank_put function is called)
+	 */
+	drm->vblank_disable_allowed = true;
+
 	platform_set_drvdata(drm->platformdev, drm);
 
 	/* Now try and bind all our sub-components */
@@ -284,12 +308,11 @@ static int imx_drm_driver_load(struct drm_device *drm, unsigned long flags)
 	 * The fb helper takes copies of key hardware information, so the
 	 * crtcs/connectors/encoders must not change after this point.
 	 */
-#if IS_ENABLED(CONFIG_DRM_FBDEV_EMULATION)
+#if IS_ENABLED(CONFIG_DRM_IMX_FB_HELPER)
 	if (legacyfb_depth != 16 && legacyfb_depth != 32) {
 		dev_warn(drm->dev, "Invalid legacyfb_depth.  Defaulting to 16bpp\n");
 		legacyfb_depth = 16;
 	}
-	drm_helper_disable_unused_functions(drm);
 	imxdrm->fbhelper = drm_fbdev_cma_init(drm, legacyfb_depth,
 				drm->mode_config.num_crtc, MAX_CRTC);
 	if (IS_ERR(imxdrm->fbhelper)) {
@@ -317,12 +340,13 @@ err_kms:
  * imx_drm_add_crtc - add a new crtc
  */
 int imx_drm_add_crtc(struct drm_device *drm, struct drm_crtc *crtc,
-		struct imx_drm_crtc **new_crtc, struct drm_plane *primary_plane,
+		struct imx_drm_crtc **new_crtc,
 		const struct imx_drm_crtc_helper_funcs *imx_drm_helper_funcs,
 		struct device_node *port)
 {
 	struct imx_drm_device *imxdrm = drm->dev_private;
 	struct imx_drm_crtc *imx_drm_crtc;
+	int ret;
 
 	/*
 	 * The vblank arrays are dimensioned by MAX_CRTC - we can't
@@ -339,21 +363,31 @@ int imx_drm_add_crtc(struct drm_device *drm, struct drm_crtc *crtc,
 		return -ENOMEM;
 
 	imx_drm_crtc->imx_drm_helper_funcs = *imx_drm_helper_funcs;
+	imx_drm_crtc->pipe = imxdrm->pipes++;
 	imx_drm_crtc->crtc = crtc;
 
 	crtc->port = port;
 
-	imxdrm->crtc[imxdrm->pipes++] = imx_drm_crtc;
+	imxdrm->crtc[imx_drm_crtc->pipe] = imx_drm_crtc;
 
 	*new_crtc = imx_drm_crtc;
+
+	ret = drm_mode_crtc_set_gamma_size(imx_drm_crtc->crtc, 256);
+	if (ret)
+		goto err_register;
 
 	drm_crtc_helper_add(crtc,
 			imx_drm_crtc->imx_drm_helper_funcs.crtc_helper_funcs);
 
-	drm_crtc_init_with_planes(drm, crtc, primary_plane, NULL,
-			imx_drm_crtc->imx_drm_helper_funcs.crtc_funcs, NULL);
+	drm_crtc_init(drm, crtc,
+			imx_drm_crtc->imx_drm_helper_funcs.crtc_funcs);
 
 	return 0;
+
+err_register:
+	imxdrm->crtc[imx_drm_crtc->pipe] = NULL;
+	kfree(imx_drm_crtc);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(imx_drm_add_crtc);
 
@@ -363,11 +397,10 @@ EXPORT_SYMBOL_GPL(imx_drm_add_crtc);
 int imx_drm_remove_crtc(struct imx_drm_crtc *imx_drm_crtc)
 {
 	struct imx_drm_device *imxdrm = imx_drm_crtc->crtc->dev->dev_private;
-	unsigned int pipe = drm_crtc_index(imx_drm_crtc->crtc);
 
 	drm_crtc_cleanup(imx_drm_crtc->crtc);
 
-	imxdrm->crtc[pipe] = NULL;
+	imxdrm->crtc[imx_drm_crtc->pipe] = NULL;
 
 	kfree(imx_drm_crtc);
 
@@ -398,6 +431,48 @@ int imx_drm_encoder_parse_of(struct drm_device *drm,
 }
 EXPORT_SYMBOL_GPL(imx_drm_encoder_parse_of);
 
+static struct device_node *imx_drm_of_get_next_endpoint(
+		const struct device_node *parent, struct device_node *prev)
+{
+	struct device_node *node = of_graph_get_next_endpoint(parent, prev);
+
+	of_node_put(prev);
+	return node;
+}
+
+/*
+ * @node: device tree node containing encoder input ports
+ * @encoder: drm_encoder
+ */
+int imx_drm_encoder_get_mux_id(struct device_node *node,
+			       struct drm_encoder *encoder)
+{
+	struct imx_drm_crtc *imx_crtc = imx_drm_find_crtc(encoder->crtc);
+	struct device_node *ep = NULL;
+	struct of_endpoint endpoint;
+	struct device_node *port;
+	int ret;
+
+	if (!node || !imx_crtc)
+		return -EINVAL;
+
+	do {
+		ep = imx_drm_of_get_next_endpoint(node, ep);
+		if (!ep)
+			break;
+
+		port = of_graph_get_remote_port(ep);
+		of_node_put(port);
+		if (port == imx_crtc->crtc->port) {
+			ret = of_graph_parse_endpoint(ep, &endpoint);
+			return ret ? ret : endpoint.port;
+		}
+	} while (ep);
+
+	return -EINVAL;
+}
+EXPORT_SYMBOL_GPL(imx_drm_encoder_get_mux_id);
+
 static const struct drm_ioctl_desc imx_drm_ioctls[] = {
 	/* none so far */
 };
@@ -407,8 +482,9 @@ static struct drm_driver imx_drm_driver = {
 	.load			= imx_drm_driver_load,
 	.unload			= imx_drm_driver_unload,
 	.lastclose		= imx_drm_driver_lastclose,
+	.preclose		= imx_drm_driver_preclose,
 	.set_busid		= drm_platform_set_busid,
-	.gem_free_object_unlocked = drm_gem_cma_free_object,
+	.gem_free_object	= drm_gem_cma_free_object,
 	.gem_vm_ops		= &drm_gem_cma_vm_ops,
 	.dumb_create		= drm_gem_cma_dumb_create,
 	.dumb_map_offset	= drm_gem_cma_dumb_map_offset,
@@ -423,7 +499,7 @@ static struct drm_driver imx_drm_driver = {
 	.gem_prime_vmap		= drm_gem_cma_prime_vmap,
 	.gem_prime_vunmap	= drm_gem_cma_prime_vunmap,
 	.gem_prime_mmap		= drm_gem_cma_prime_mmap,
-	.get_vblank_counter	= drm_vblank_no_hw_counter,
+	.get_vblank_counter	= drm_vblank_count,
 	.enable_vblank		= imx_drm_enable_vblank,
 	.disable_vblank		= imx_drm_disable_vblank,
 	.ioctls			= imx_drm_ioctls,
@@ -440,13 +516,6 @@ static struct drm_driver imx_drm_driver = {
 static int compare_of(struct device *dev, void *data)
 {
 	struct device_node *np = data;
-
-	/* Special case for DI, dev->of_node may not be set yet */
-	if (strcmp(dev->driver->name, "imx-ipuv3-crtc") == 0) {
-		struct ipu_client_platformdata *pdata = dev->platform_data;
-
-		return pdata->of_node == np;
-	}
 
 	/* Special case for LDB, one device for two channels */
 	if (of_node_cmp(np->name, "lvds-channel") == 0) {
@@ -474,12 +543,59 @@ static const struct component_master_ops imx_drm_ops = {
 
 static int imx_drm_platform_probe(struct platform_device *pdev)
 {
-	int ret = drm_of_component_probe(&pdev->dev, compare_of, &imx_drm_ops);
+	struct device_node *ep, *port, *remote;
+	struct component_match *match = NULL;
+	int ret;
+	int i;
 
-	if (!ret)
-		ret = dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(32));
+	/*
+	 * Bind the IPU display interface ports first, so that
+	 * imx_drm_encoder_parse_of called from encoder .bind callbacks
+	 * works as expected.
+	 */
+	for (i = 0; ; i++) {
+		port = of_parse_phandle(pdev->dev.of_node, "ports", i);
+		if (!port)
+			break;
 
-	return ret;
+		component_match_add(&pdev->dev, &match, compare_of, port);
+	}
+
+	if (i == 0) {
+		dev_err(&pdev->dev, "missing 'ports' property\n");
+		return -ENODEV;
+	}
+
+	/* Then bind all encoders */
+	for (i = 0; ; i++) {
+		port = of_parse_phandle(pdev->dev.of_node, "ports", i);
+		if (!port)
+			break;
+
+		for_each_child_of_node(port, ep) {
+			remote = of_graph_get_remote_port_parent(ep);
+			if (!remote || !of_device_is_available(remote)) {
+				of_node_put(remote);
+				continue;
+			} else if (!of_device_is_available(remote->parent)) {
+				dev_warn(&pdev->dev, "parent device of %s is not available\n",
+					 remote->full_name);
+				of_node_put(remote);
+				continue;
+			}
+
+			component_match_add(&pdev->dev, &match, compare_of,
+					    remote);
+			of_node_put(remote);
+		}
+		of_node_put(port);
+	}
+
+	ret = dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(32));
+	if (ret)
+		return ret;
+
+	return component_master_add_with_match(&pdev->dev, &imx_drm_ops, match);
 }
 
 static int imx_drm_platform_remove(struct platform_device *pdev)

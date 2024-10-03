@@ -251,7 +251,7 @@ static int sdhci_st_set_dll_for_clock(struct sdhci_host *host)
 {
 	int ret = 0;
 	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
-	struct st_mmc_platform_data *pdata = sdhci_pltfm_priv(pltfm_host);
+	struct st_mmc_platform_data *pdata = pltfm_host->priv;
 
 	if (host->clock > CLK_TO_CHECK_DLL_LOCK) {
 		st_mmcss_set_dll(pdata->top_ioaddr);
@@ -265,7 +265,7 @@ static void sdhci_st_set_uhs_signaling(struct sdhci_host *host,
 					unsigned int uhs)
 {
 	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
-	struct st_mmc_platform_data *pdata = sdhci_pltfm_priv(pltfm_host);
+	struct st_mmc_platform_data *pdata = pltfm_host->priv;
 	u16 ctrl_2 = sdhci_readw(host, SDHCI_HOST_CONTROL2);
 	int ret = 0;
 
@@ -357,7 +357,10 @@ static int sdhci_st_probe(struct platform_device *pdev)
 	int ret = 0;
 	u16 host_version;
 	struct resource *res;
-	struct reset_control *rstc;
+
+	pdata = devm_kzalloc(&pdev->dev, sizeof(*pdata), GFP_KERNEL);
+	if (!pdata)
+		return -ENOMEM;
 
 	clk =  devm_clk_get(&pdev->dev, "mmc");
 	if (IS_ERR(clk)) {
@@ -365,22 +368,18 @@ static int sdhci_st_probe(struct platform_device *pdev)
 		return PTR_ERR(clk);
 	}
 
-	rstc = devm_reset_control_get(&pdev->dev, NULL);
-	if (IS_ERR(rstc))
-		rstc = NULL;
+	pdata->rstc = devm_reset_control_get(&pdev->dev, NULL);
+	if (IS_ERR(pdata->rstc))
+		pdata->rstc = NULL;
 	else
-		reset_control_deassert(rstc);
+		reset_control_deassert(pdata->rstc);
 
-	host = sdhci_pltfm_init(pdev, &sdhci_st_pdata, sizeof(*pdata));
+	host = sdhci_pltfm_init(pdev, &sdhci_st_pdata, 0);
 	if (IS_ERR(host)) {
 		dev_err(&pdev->dev, "Failed sdhci_pltfm_init\n");
 		ret = PTR_ERR(host);
 		goto err_pltfm_init;
 	}
-
-	pltfm_host = sdhci_priv(host);
-	pdata = sdhci_pltfm_priv(pltfm_host);
-	pdata->rstc = rstc;
 
 	ret = mmc_of_parse(host->mmc);
 	if (ret) {
@@ -399,6 +398,8 @@ static int sdhci_st_probe(struct platform_device *pdev)
 		pdata->top_ioaddr = NULL;
 	}
 
+	pltfm_host = sdhci_priv(host);
+	pltfm_host->priv = pdata;
 	pltfm_host->clk = clk;
 
 	/* Configure the Arasan HC inside the flashSS */
@@ -426,8 +427,8 @@ err_out:
 err_of:
 	sdhci_pltfm_free(pdev);
 err_pltfm_init:
-	if (rstc)
-		reset_control_assert(rstc);
+	if (pdata->rstc)
+		reset_control_assert(pdata->rstc);
 
 	return ret;
 }
@@ -436,14 +437,13 @@ static int sdhci_st_remove(struct platform_device *pdev)
 {
 	struct sdhci_host *host = platform_get_drvdata(pdev);
 	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
-	struct st_mmc_platform_data *pdata = sdhci_pltfm_priv(pltfm_host);
-	struct reset_control *rstc = pdata->rstc;
+	struct st_mmc_platform_data *pdata = pltfm_host->priv;
 	int ret;
 
 	ret = sdhci_pltfm_unregister(pdev);
 
-	if (rstc)
-		reset_control_assert(rstc);
+	if (pdata->rstc)
+		reset_control_assert(pdata->rstc);
 
 	return ret;
 }
@@ -453,7 +453,7 @@ static int sdhci_st_suspend(struct device *dev)
 {
 	struct sdhci_host *host = dev_get_drvdata(dev);
 	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
-	struct st_mmc_platform_data *pdata = sdhci_pltfm_priv(pltfm_host);
+	struct st_mmc_platform_data *pdata = pltfm_host->priv;
 	int ret = sdhci_suspend_host(host);
 
 	if (ret)
@@ -471,7 +471,7 @@ static int sdhci_st_resume(struct device *dev)
 {
 	struct sdhci_host *host = dev_get_drvdata(dev);
 	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
-	struct st_mmc_platform_data *pdata = sdhci_pltfm_priv(pltfm_host);
+	struct st_mmc_platform_data *pdata = pltfm_host->priv;
 	struct device_node *np = dev->of_node;
 
 	clk_prepare_enable(pltfm_host->clk);
@@ -509,4 +509,4 @@ module_platform_driver(sdhci_st_driver);
 MODULE_DESCRIPTION("SDHCI driver for STMicroelectronics SoCs");
 MODULE_AUTHOR("Giuseppe Cavallaro <peppe.cavallaro@st.com>");
 MODULE_LICENSE("GPL v2");
-MODULE_ALIAS("platform:sdhci-st");
+MODULE_ALIAS("platform:st-sdhci");

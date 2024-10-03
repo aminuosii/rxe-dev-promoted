@@ -1,6 +1,6 @@
 /*
- * Copyright (c) 2016 Mellanox Technologies Ltd. All rights reserved.
- * Copyright (c) 2015 System Fabric Works, Inc. All rights reserved.
+ * Copyright (c) 2009-2011 Mellanox Technologies Ltd. All rights reserved.
+ * Copyright (c) 2009-2011 System Fabric Works, Inc. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -64,7 +64,9 @@ struct rxe_task {
 int rxe_init_task(void *obj, struct rxe_task *task,
 		  void *arg, int (*func)(void *), char *name);
 
-/* cleanup task */
+/*
+ * cleanup task
+ */
 void rxe_cleanup_task(struct rxe_task *task);
 
 /*
@@ -81,15 +83,19 @@ int __rxe_do_task(struct rxe_task *task);
  */
 void rxe_do_task(unsigned long data);
 
-/* run a task, else schedule it to run as a tasklet, The decision
- * to run or schedule tasklet is based on the parameter sched.
+/*
+ * run a task, else schedule it to run as a tasklet
  */
 void rxe_run_task(struct rxe_task *task, int sched);
 
-/* keep a task from scheduling */
+/*
+ * keep a task from scheduling
+ */
 void rxe_disable_task(struct rxe_task *task);
 
-/* allow task to run */
+/*
+ * allow task to run
+ */
 void rxe_enable_task(struct rxe_task *task);
 
 #endif /* RXE_TASK_H */

@@ -21,10 +21,8 @@
 #include <asm/page_types.h>
 #include <asm/asm-offsets.h>
 #include <asm/processor-flags.h>
-#include <asm/frame.h>
 
 ENTRY(swsusp_arch_suspend)
-	FRAME_BEGIN
 	movq	$saved_context, %rax
 	movq	%rsp, pt_regs_sp(%rax)
 	movq	%rbp, pt_regs_bp(%rax)
@@ -52,9 +50,7 @@ ENTRY(swsusp_arch_suspend)
 	movq	%rax, restore_cr3(%rip)
 
 	call swsusp_save
-	FRAME_END
 	ret
-ENDPROC(swsusp_arch_suspend)
 
 ENTRY(restore_image)
 	/* switch to temporary page tables */
@@ -82,9 +78,9 @@ ENTRY(restore_image)
 
 	/* code below has been relocated to a safe page */
 ENTRY(core_restore_code)
-.Lloop:
+loop:
 	testq	%rdx, %rdx
-	jz	.Ldone
+	jz	done
 
 	/* get addresses from the pbe and copy the page */
 	movq	pbe_address(%rdx), %rsi
@@ -95,8 +91,8 @@ ENTRY(core_restore_code)
 
 	/* progress to the next pbe */
 	movq	pbe_next(%rdx), %rdx
-	jmp	.Lloop
-.Ldone:
+	jmp	loop
+done:
 	/* jump to the restore_registers address from the image header */
 	jmpq	*%rax
 	/*
@@ -111,7 +107,6 @@ ENTRY(core_restore_code)
 	 */
 
 ENTRY(restore_registers)
-	FRAME_BEGIN
 	/* go back to the original page tables */
 	movq    %rbx, %cr3
 
@@ -152,6 +147,4 @@ ENTRY(restore_registers)
 	/* tell the hibernation core that we've just restored the memory */
 	movq	%rax, in_suspend(%rip)
 
-	FRAME_END
 	ret
-ENDPROC(restore_registers)

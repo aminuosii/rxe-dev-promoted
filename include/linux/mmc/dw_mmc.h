@@ -16,7 +16,6 @@
 
 #include <linux/scatterlist.h>
 #include <linux/mmc/core.h>
-#include <linux/dmaengine.h>
 
 #define MAX_MCI_SLOTS	2
 
@@ -36,25 +35,14 @@ enum {
 	EVENT_XFER_COMPLETE,
 	EVENT_DATA_COMPLETE,
 	EVENT_DATA_ERROR,
+	EVENT_XFER_ERROR
 };
 
 struct mmc_data;
 
-enum {
-	TRANS_MODE_PIO = 0,
-	TRANS_MODE_IDMAC,
-	TRANS_MODE_EDMAC
-};
-
-struct dw_mci_dma_slave {
-	struct dma_chan *ch;
-	enum dma_transfer_direction direction;
-};
-
 /**
  * struct dw_mci - MMC controller state shared between all slots
  * @lock: Spinlock protecting the queue and associated data.
- * @irq_lock: Spinlock protecting the INTMASK setting.
  * @regs: Pointer to MMIO registers.
  * @fifo_reg: Pointer to MMIO registers for data FIFO
  * @sg: Scatterlist entry currently being processed by PIO code, if any.
@@ -65,9 +53,6 @@ struct dw_mci_dma_slave {
  * @cmd: The command currently being sent to the card, or NULL.
  * @data: The data currently being transferred, or NULL if no data
  *	transfer is in progress.
- * @stop_abort: The command currently prepared for stoping transfer.
- * @prev_blksz: The former transfer blksz record.
- * @timing: Record of current ios timing.
  * @use_dma: Whether DMA channel is initialized or not.
  * @using_dma: Whether DMA is in use for the current transfer.
  * @dma_64bit_address: Whether DMA supports 64-bit address mode or not.
@@ -75,10 +60,7 @@ struct dw_mci_dma_slave {
  * @sg_cpu: Virtual address of DMA buffer.
  * @dma_ops: Pointer to platform-specific DMA callbacks.
  * @cmd_status: Snapshot of SR taken upon completion of the current
- * @ring_size: Buffer size for idma descriptors.
  *	command. Only valid when EVENT_CMD_COMPLETE is pending.
- * @dms: structure of slave-dma private data.
- * @phy_regs: physical address of controller's register map
  * @data_status: Snapshot of SR taken upon completion of the current
  *	data transfer. Only valid when EVENT_DATA_COMPLETE or
  *	EVENT_DATA_ERROR is pending.
@@ -86,6 +68,7 @@ struct dw_mci_dma_slave {
  *	to be sent.
  * @dir_status: Direction of current transfer.
  * @tasklet: Tasklet running the request state machine.
+ * @card_tasklet: Tasklet handling card detect.
  * @pending_events: Bitmask of events flagged by the interrupt handler
  *	to be processed by the tasklet.
  * @completed_events: Bitmask of events which the state machine has
@@ -96,7 +79,6 @@ struct dw_mci_dma_slave {
  *	rate and timeout calculations.
  * @current_speed: Configured rate of the controller.
  * @num_slots: Number of slots available.
- * @fifoth_val: The value of FIFOTH register.
  * @verid: Denote Version ID.
  * @dev: Device associated with the MMC controller.
  * @pdata: Platform data associated with the MMC controller.
@@ -113,12 +95,9 @@ struct dw_mci_dma_slave {
  * @push_data: Pointer to FIFO push function.
  * @pull_data: Pointer to FIFO pull function.
  * @quirks: Set of quirks that apply to specific versions of the IP.
- * @vqmmc_enabled: Status of vqmmc, should be true or false.
  * @irq_flags: The flags to be passed to request_irq.
  * @irq: The irq value to be passed to request_irq.
  * @sdio_id0: Number of slot0 in the SDIO interrupt registers.
- * @cmd11_timer: Timer for SD3.0 voltage switch over scheme.
- * @dto_timer: Timer for broken data transfer over scheme.
  *
  * Locking
  * =======
@@ -174,14 +153,11 @@ struct dw_mci {
 	dma_addr_t		sg_dma;
 	void			*sg_cpu;
 	const struct dw_mci_dma_ops	*dma_ops;
-	/* For idmac */
+#ifdef CONFIG_MMC_DW_IDMAC
 	unsigned int		ring_size;
-
-	/* For edmac */
-	struct dw_mci_dma_slave *dms;
-	/* Registers's physical base address */
-	resource_size_t		phy_regs;
-
+#else
+	struct dw_mci_dma_data	*dma_data;
+#endif
 	u32			cmd_status;
 	u32			data_status;
 	u32			stop_cmdr;
@@ -228,25 +204,44 @@ struct dw_mci {
 	int			sdio_id0;
 
 	struct timer_list       cmd11_timer;
-	struct timer_list       dto_timer;
 };
 
 /* DMA ops for Internal/External DMAC interface */
 struct dw_mci_dma_ops {
 	/* DMA Ops */
 	int (*init)(struct dw_mci *host);
-	int (*start)(struct dw_mci *host, unsigned int sg_len);
-	void (*complete)(void *host);
+	void (*start)(struct dw_mci *host, unsigned int sg_len);
+	void (*complete)(struct dw_mci *host);
 	void (*stop)(struct dw_mci *host);
 	void (*cleanup)(struct dw_mci *host);
 	void (*exit)(struct dw_mci *host);
 };
 
 /* IP Quirks/flags. */
-/* Timer for broken data transfer over scheme */
-#define DW_MCI_QUIRK_BROKEN_DTO			BIT(0)
+/* DTO fix for command transmission with IDMAC configured */
+#define DW_MCI_QUIRK_IDMAC_DTO			BIT(0)
+/* delay needed between retries on some 2.11a implementations */
+#define DW_MCI_QUIRK_RETRY_DELAY		BIT(1)
+/* High Speed Capable - Supports HS cards (up to 50MHz) */
+#define DW_MCI_QUIRK_HIGHSPEED			BIT(2)
+/* Unreliable card detection */
+#define DW_MCI_QUIRK_BROKEN_CARD_DETECTION	BIT(3)
+/* No write protect */
+#define DW_MCI_QUIRK_NO_WRITE_PROTECT		BIT(4)
+
+/* Slot level quirks */
+/* This slot has no write protect */
+#define DW_MCI_SLOT_QUIRK_NO_WRITE_PROTECT	BIT(0)
 
 struct dma_pdata;
+
+struct block_settings {
+	unsigned short	max_segs;	/* see blk_queue_max_segments */
+	unsigned int	max_blk_size;	/* maximum size of one mmc block */
+	unsigned int	max_blk_count;	/* maximum number of blocks in one req*/
+	unsigned int	max_req_size;	/* maximum number of bytes in one req*/
+	unsigned int	max_seg_size;	/* see blk_queue_max_segment_size */
+};
 
 /* Board platform data */
 struct dw_mci_board {
@@ -270,6 +265,7 @@ struct dw_mci_board {
 
 	struct dw_mci_dma_ops *dma_ops;
 	struct dma_pdata *data;
+	struct block_settings *blk_settings;
 };
 
 #endif /* LINUX_MMC_DW_MMC_H */

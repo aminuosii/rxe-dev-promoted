@@ -55,7 +55,6 @@
 #include <linux/delay.h>
 #include <linux/irq_work.h>
 #include <linux/clk-provider.h>
-#include <linux/suspend.h>
 #include <asm/trace.h>
 
 #include <asm/io.h>
@@ -100,17 +99,16 @@ static struct clocksource clocksource_timebase = {
 
 static int decrementer_set_next_event(unsigned long evt,
 				      struct clock_event_device *dev);
-static int decrementer_shutdown(struct clock_event_device *evt);
+static void decrementer_set_mode(enum clock_event_mode mode,
+				 struct clock_event_device *dev);
 
 struct clock_event_device decrementer_clockevent = {
-	.name			= "decrementer",
-	.rating			= 200,
-	.irq			= 0,
-	.set_next_event		= decrementer_set_next_event,
-	.set_state_shutdown	= decrementer_shutdown,
-	.tick_resume		= decrementer_shutdown,
-	.features		= CLOCK_EVT_FEAT_ONESHOT |
-				  CLOCK_EVT_FEAT_C3STOP,
+	.name           = "decrementer",
+	.rating         = 200,
+	.irq            = 0,
+	.set_next_event = decrementer_set_next_event,
+	.set_mode       = decrementer_set_mode,
+	.features       = CLOCK_EVT_FEAT_ONESHOT | CLOCK_EVT_FEAT_C3STOP,
 };
 EXPORT_SYMBOL(decrementer_clockevent);
 
@@ -610,12 +608,6 @@ void arch_suspend_enable_irqs(void)
 }
 #endif
 
-unsigned long long tb_to_ns(unsigned long long ticks)
-{
-	return mulhdu(ticks, tb_to_ns_scale) << tb_to_ns_shift;
-}
-EXPORT_SYMBOL_GPL(tb_to_ns);
-
 /*
  * Scheduler clock - returns current time in nanosec units.
  *
@@ -864,10 +856,11 @@ static int decrementer_set_next_event(unsigned long evt,
 	return 0;
 }
 
-static int decrementer_shutdown(struct clock_event_device *dev)
+static void decrementer_set_mode(enum clock_event_mode mode,
+				 struct clock_event_device *dev)
 {
-	decrementer_set_next_event(DECREMENTER_MAX, dev);
-	return 0;
+	if (mode != CLOCK_EVT_MODE_ONESHOT)
+		decrementer_set_next_event(DECREMENTER_MAX, dev);
 }
 
 /* Interrupt handler for the timer broadcast IPI */
@@ -1003,6 +996,38 @@ static int month_days[12] = {
 	31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31
 };
 
+/*
+ * This only works for the Gregorian calendar - i.e. after 1752 (in the UK)
+ */
+void GregorianDay(struct rtc_time * tm)
+{
+	int leapsToDate;
+	int lastYear;
+	int day;
+	int MonthOffset[] = { 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 };
+
+	lastYear = tm->tm_year - 1;
+
+	/*
+	 * Number of leap corrections to apply up to end of last year
+	 */
+	leapsToDate = lastYear / 4 - lastYear / 100 + lastYear / 400;
+
+	/*
+	 * This year is a leap year if it is divisible by 4 except when it is
+	 * divisible by 100 unless it is divisible by 400
+	 *
+	 * e.g. 1904 was a leap year, 1900 was not, 1996 is, and 2000 was
+	 */
+	day = tm->tm_mon > 2 && leapyear(tm->tm_year);
+
+	day += lastYear*365 + leapsToDate + MonthOffset[tm->tm_mon-1] +
+		   tm->tm_mday;
+
+	tm->tm_wday = day % 7;
+}
+EXPORT_SYMBOL_GPL(GregorianDay);
+
 void to_tm(int tim, struct rtc_time * tm)
 {
 	register int    i;
@@ -1033,9 +1058,9 @@ void to_tm(int tim, struct rtc_time * tm)
 	tm->tm_mday = day + 1;
 
 	/*
-	 * No-one uses the day of the week.
+	 * Determine the day of week
 	 */
-	tm->tm_wday = -1;
+	GregorianDay(tm);
 }
 EXPORT_SYMBOL(to_tm);
 
@@ -1093,4 +1118,4 @@ static int __init rtc_init(void)
 	return PTR_ERR_OR_ZERO(pdev);
 }
 
-device_initcall(rtc_init);
+module_init(rtc_init);

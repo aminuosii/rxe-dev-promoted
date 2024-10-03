@@ -1169,14 +1169,15 @@ static void ehea_parse_eqe(struct ehea_adapter *adapter, u64 eqe)
 	ec = EHEA_BMASK_GET(NEQE_EVENT_CODE, eqe);
 	portnum = EHEA_BMASK_GET(NEQE_PORTNUM, eqe);
 	port = ehea_get_port(adapter, portnum);
-	if (!port) {
-		netdev_err(NULL, "unknown portnum %x\n", portnum);
-		return;
-	}
 	dev = port->netdev;
 
 	switch (ec) {
 	case EHEA_EC_PORTSTATE_CHG:	/* port state change */
+
+		if (!port) {
+			netdev_err(dev, "unknown portnum %x\n", portnum);
+			break;
+		}
 
 		if (EHEA_BMASK_GET(NEQE_PORT_UP, eqe)) {
 			if (!netif_carrier_ok(dev)) {
@@ -3346,7 +3347,7 @@ static int ehea_register_memory_hooks(void)
 {
 	int ret = 0;
 
-	if (atomic_inc_return(&ehea_memory_hooks_registered) > 1)
+	if (atomic_inc_and_test(&ehea_memory_hooks_registered))
 		return 0;
 
 	ret = ehea_create_busmap();
@@ -3380,14 +3381,12 @@ out3:
 out2:
 	unregister_reboot_notifier(&ehea_reboot_nb);
 out:
-	atomic_dec(&ehea_memory_hooks_registered);
 	return ret;
 }
 
 static void ehea_unregister_memory_hooks(void)
 {
-	/* Only remove the hooks if we've registered them */
-	if (atomic_read(&ehea_memory_hooks_registered) == 0)
+	if (atomic_read(&ehea_memory_hooks_registered))
 		return;
 
 	unregister_reboot_notifier(&ehea_reboot_nb);

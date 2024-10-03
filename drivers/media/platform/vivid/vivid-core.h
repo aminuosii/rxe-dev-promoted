@@ -21,11 +21,11 @@
 #define _VIVID_CORE_H_
 
 #include <linux/fb.h>
-#include <media/videobuf2-v4l2.h>
+#include <media/videobuf2-core.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-dev.h>
 #include <media/v4l2-ctrls.h>
-#include <media/v4l2-tpg.h>
+#include "vivid-tpg.h"
 #include "vivid-rds-gen.h"
 #include "vivid-vbi-gen.h"
 
@@ -77,15 +77,14 @@ extern const struct v4l2_rect vivid_max_rect;
 extern unsigned vivid_debug;
 
 struct vivid_fmt {
+	const char *name;
 	u32	fourcc;          /* v4l2 format id */
+	u8	depth;
 	bool	is_yuv;
 	bool	can_do_overlay;
-	u8	vdownsampling[TPG_MAX_PLANES];
 	u32	alpha_mask;
 	u8	planes;
-	u8	buffers;
-	u32	data_offset[TPG_MAX_PLANES];
-	u32	bit_depth[TPG_MAX_PLANES];
+	u32	data_offset[2];
 };
 
 extern struct vivid_fmt vivid_formats[];
@@ -93,7 +92,7 @@ extern struct vivid_fmt vivid_formats[];
 /* buffer for one video frame */
 struct vivid_buffer {
 	/* common v4l buffer stuff -- must be first */
-	struct vb2_v4l2_buffer vb;
+	struct vb2_buffer	vb;
 	struct list_head	list;
 };
 
@@ -123,7 +122,6 @@ enum vivid_colorspace {
 	VIVID_CS_SRGB,
 	VIVID_CS_ADOBERGB,
 	VIVID_CS_2020,
-	VIVID_CS_DCI_P3,
 	VIVID_CS_240M,
 	VIVID_CS_SYS_M,
 	VIVID_CS_SYS_BG,
@@ -140,7 +138,7 @@ struct vivid_dev {
 	struct v4l2_ctrl_handler	ctrl_hdl_user_aud;
 	struct v4l2_ctrl_handler	ctrl_hdl_streaming;
 	struct v4l2_ctrl_handler	ctrl_hdl_sdtv_cap;
-	struct v4l2_ctrl_handler	ctrl_hdl_loop_cap;
+	struct v4l2_ctrl_handler	ctrl_hdl_loop_out;
 	struct video_device		vid_cap_dev;
 	struct v4l2_ctrl_handler	ctrl_hdl_vid_cap;
 	struct video_device		vid_out_dev;
@@ -264,7 +262,6 @@ struct vivid_dev {
 	bool				vflip;
 	bool				vbi_cap_interlaced;
 	bool				loop_video;
-	bool				reduced_fps;
 
 	/* Framebuffer */
 	unsigned long			video_pbase;
@@ -286,7 +283,7 @@ struct vivid_dev {
 	bool				dqbuf_error;
 	bool				seq_wrap;
 	bool				time_wrap;
-	u64				time_wrap_offset;
+	__kernel_time_t			time_wrap_offset;
 	unsigned			perc_dropped_buffers;
 	enum vivid_signal_mode		std_signal_mode;
 	unsigned			query_std_last;
@@ -334,9 +331,8 @@ struct vivid_dev {
 	u32				colorspace_out;
 	u32				ycbcr_enc_out;
 	u32				quantization_out;
-	u32				xfer_func_out;
 	u32				service_set_out;
-	unsigned			bytesperline_out[TPG_MAX_PLANES];
+	u32				bytesperline_out[2];
 	unsigned			tv_field_out;
 	unsigned			tv_audio_output;
 	bool				vbi_out_have_wss;
@@ -449,11 +445,8 @@ struct vivid_dev {
 	/* SDR capture */
 	struct vb2_queue		vb_sdr_cap_q;
 	struct list_head		sdr_cap_active;
-	u32				sdr_pixelformat; /* v4l2 format id */
-	unsigned			sdr_buffersize;
 	unsigned			sdr_adc_freq;
 	unsigned			sdr_fm_freq;
-	unsigned			sdr_fm_deviation;
 	int				sdr_fixp_src_phase;
 	int				sdr_fixp_mod_phase;
 

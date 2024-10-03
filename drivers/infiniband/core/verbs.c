@@ -48,74 +48,8 @@
 #include <rdma/ib_verbs.h>
 #include <rdma/ib_cache.h>
 #include <rdma/ib_addr.h>
-#include <rdma/rw.h>
 
 #include "core_priv.h"
-
-static const char * const ib_events[] = {
-	[IB_EVENT_CQ_ERR]		= "CQ error",
-	[IB_EVENT_QP_FATAL]		= "QP fatal error",
-	[IB_EVENT_QP_REQ_ERR]		= "QP request error",
-	[IB_EVENT_QP_ACCESS_ERR]	= "QP access error",
-	[IB_EVENT_COMM_EST]		= "communication established",
-	[IB_EVENT_SQ_DRAINED]		= "send queue drained",
-	[IB_EVENT_PATH_MIG]		= "path migration successful",
-	[IB_EVENT_PATH_MIG_ERR]		= "path migration error",
-	[IB_EVENT_DEVICE_FATAL]		= "device fatal error",
-	[IB_EVENT_PORT_ACTIVE]		= "port active",
-	[IB_EVENT_PORT_ERR]		= "port error",
-	[IB_EVENT_LID_CHANGE]		= "LID change",
-	[IB_EVENT_PKEY_CHANGE]		= "P_key change",
-	[IB_EVENT_SM_CHANGE]		= "SM change",
-	[IB_EVENT_SRQ_ERR]		= "SRQ error",
-	[IB_EVENT_SRQ_LIMIT_REACHED]	= "SRQ limit reached",
-	[IB_EVENT_QP_LAST_WQE_REACHED]	= "last WQE reached",
-	[IB_EVENT_CLIENT_REREGISTER]	= "client reregister",
-	[IB_EVENT_GID_CHANGE]		= "GID changed",
-};
-
-const char *__attribute_const__ ib_event_msg(enum ib_event_type event)
-{
-	size_t index = event;
-
-	return (index < ARRAY_SIZE(ib_events) && ib_events[index]) ?
-			ib_events[index] : "unrecognized event";
-}
-EXPORT_SYMBOL(ib_event_msg);
-
-static const char * const wc_statuses[] = {
-	[IB_WC_SUCCESS]			= "success",
-	[IB_WC_LOC_LEN_ERR]		= "local length error",
-	[IB_WC_LOC_QP_OP_ERR]		= "local QP operation error",
-	[IB_WC_LOC_EEC_OP_ERR]		= "local EE context operation error",
-	[IB_WC_LOC_PROT_ERR]		= "local protection error",
-	[IB_WC_WR_FLUSH_ERR]		= "WR flushed",
-	[IB_WC_MW_BIND_ERR]		= "memory management operation error",
-	[IB_WC_BAD_RESP_ERR]		= "bad response error",
-	[IB_WC_LOC_ACCESS_ERR]		= "local access error",
-	[IB_WC_REM_INV_REQ_ERR]		= "invalid request error",
-	[IB_WC_REM_ACCESS_ERR]		= "remote access error",
-	[IB_WC_REM_OP_ERR]		= "remote operation error",
-	[IB_WC_RETRY_EXC_ERR]		= "transport retry counter exceeded",
-	[IB_WC_RNR_RETRY_EXC_ERR]	= "RNR retry counter exceeded",
-	[IB_WC_LOC_RDD_VIOL_ERR]	= "local RDD violation error",
-	[IB_WC_REM_INV_RD_REQ_ERR]	= "remote invalid RD request",
-	[IB_WC_REM_ABORT_ERR]		= "operation aborted",
-	[IB_WC_INV_EECN_ERR]		= "invalid EE context number",
-	[IB_WC_INV_EEC_STATE_ERR]	= "invalid EE context state",
-	[IB_WC_FATAL_ERR]		= "fatal error",
-	[IB_WC_RESP_TIMEOUT_ERR]	= "response timeout error",
-	[IB_WC_GENERAL_ERR]		= "general error",
-};
-
-const char *__attribute_const__ ib_wc_status_msg(enum ib_wc_status status)
-{
-	size_t index = status;
-
-	return (index < ARRAY_SIZE(wc_statuses) && wc_statuses[index]) ?
-			wc_statuses[index] : "unrecognized status";
-}
-EXPORT_SYMBOL(ib_wc_status_msg);
 
 __attribute_const__ int ib_rate_to_mult(enum ib_rate rate)
 {
@@ -217,73 +151,28 @@ EXPORT_SYMBOL(rdma_port_get_link_layer);
 
 /* Protection domains */
 
-/**
- * ib_alloc_pd - Allocates an unused protection domain.
- * @device: The device on which to allocate the protection domain.
- *
- * A protection domain object provides an association between QPs, shared
- * receive queues, address handles, memory regions, and memory windows.
- *
- * Every PD has a local_dma_lkey which can be used as the lkey value for local
- * memory operations.
- */
 struct ib_pd *ib_alloc_pd(struct ib_device *device)
 {
 	struct ib_pd *pd;
 
 	pd = device->alloc_pd(device, NULL, NULL);
-	if (IS_ERR(pd))
-		return pd;
 
-	pd->device = device;
-	pd->uobject = NULL;
-	pd->local_mr = NULL;
-	atomic_set(&pd->usecnt, 0);
-
-	if (device->attrs.device_cap_flags & IB_DEVICE_LOCAL_DMA_LKEY)
-		pd->local_dma_lkey = device->local_dma_lkey;
-	else {
-		struct ib_mr *mr;
-
-		mr = ib_get_dma_mr(pd, IB_ACCESS_LOCAL_WRITE);
-		if (IS_ERR(mr)) {
-			ib_dealloc_pd(pd);
-			return (struct ib_pd *)mr;
-		}
-
-		pd->local_mr = mr;
-		pd->local_dma_lkey = pd->local_mr->lkey;
+	if (!IS_ERR(pd)) {
+		pd->device  = device;
+		pd->uobject = NULL;
+		atomic_set(&pd->usecnt, 0);
 	}
+
 	return pd;
 }
 EXPORT_SYMBOL(ib_alloc_pd);
 
-/**
- * ib_dealloc_pd - Deallocates a protection domain.
- * @pd: The protection domain to deallocate.
- *
- * It is an error to call this function while any resources in the pd still
- * exist.  The caller is responsible to synchronously destroy them and
- * guarantee no new allocations will happen.
- */
-void ib_dealloc_pd(struct ib_pd *pd)
+int ib_dealloc_pd(struct ib_pd *pd)
 {
-	int ret;
+	if (atomic_read(&pd->usecnt))
+		return -EBUSY;
 
-	if (pd->local_mr) {
-		ret = ib_dereg_mr(pd->local_mr);
-		WARN_ON(ret);
-		pd->local_mr = NULL;
-	}
-
-	/* uverbs manipulates usecnt with proper locking, while the kabi
-	   requires the caller to guarantee we can't race here. */
-	WARN_ON(atomic_read(&pd->usecnt));
-
-	/* Making delalloc_pd a void return is a WIP, no driver should return
-	   an error here. */
-	ret = pd->device->dealloc_pd(pd);
-	WARN_ONCE(ret, "Infiniband HW driver failed dealloc_pd");
+	return pd->device->dealloc_pd(pd);
 }
 EXPORT_SYMBOL(ib_dealloc_pd);
 
@@ -306,33 +195,25 @@ struct ib_ah *ib_create_ah(struct ib_pd *pd, struct ib_ah_attr *ah_attr)
 }
 EXPORT_SYMBOL(ib_create_ah);
 
-static int ib_get_header_version(const union rdma_network_hdr *hdr)
+static int ib_get_grh_header_version(const union rdma_network_hdr *h)
 {
-	const struct iphdr *ip4h = (struct iphdr *)&hdr->roce4grh;
+	const struct iphdr *ip4h = (struct iphdr *)&h->roce4grh;
 	struct iphdr ip4h_checked;
-	const struct ipv6hdr *ip6h = (struct ipv6hdr *)&hdr->ibgrh;
+	const struct ipv6hdr *ip6h = (struct ipv6hdr *)&h->ibgrh;
 
-	/* If it's IPv6, the version must be 6, otherwise, the first
-	 * 20 bytes (before the IPv4 header) are garbled.
-	 */
 	if (ip6h->version != 6)
 		return (ip4h->version == 4) ? 4 : 0;
-	/* version may be 6 or 4 because the first 20 bytes could be garbled */
-
-	/* RoCE v2 requires no options, thus header length
-	 * must be 5 words
-	 */
-	if (ip4h->ihl != 5)
+	/* version may be 6 or 4 */
+	if (ip4h->ihl != 5) /* IPv4 header length must be 5 for RR */
 		return 6;
-
 	/* Verify checksum.
-	 * We can't write on scattered buffers so we need to copy to
-	 * temp buffer.
+	   We can't write on scattered buffers so we need to copy to
+	   temp buffer.
 	 */
 	memcpy(&ip4h_checked, ip4h, sizeof(ip4h_checked));
 	ip4h_checked.check = 0;
 	ip4h_checked.check = ip_fast_csum((u8 *)&ip4h_checked, 5);
-	/* if IPv4 header checksum is OK, believe it */
+	/* if IPv4 header checksum is OK, bellive it */
 	if (ip4h->check == ip4h_checked.check)
 		return 4;
 	return 6;
@@ -344,10 +225,10 @@ static enum rdma_network_type ib_get_net_type_by_grh(struct ib_device *device,
 {
 	int grh_version;
 
-	if (rdma_protocol_ib(device, port_num))
+	if (rdma_port_get_link_layer(device, port_num) == IB_LINK_LAYER_INFINIBAND)
 		return RDMA_NETWORK_IB;
 
-	grh_version = ib_get_header_version((union rdma_network_hdr *)grh);
+	grh_version = ib_get_grh_header_version((union rdma_network_hdr *)grh);
 
 	if (grh_version == 4)
 		return RDMA_NETWORK_IPV4;
@@ -355,7 +236,7 @@ static enum rdma_network_type ib_get_net_type_by_grh(struct ib_device *device,
 	if (grh->next_hdr == IPPROTO_UDP)
 		return RDMA_NETWORK_IPV6;
 
-	return RDMA_NETWORK_ROCE_V1;
+	return RDMA_NETWORK_IB;
 }
 
 struct find_gid_index_context {
@@ -382,7 +263,7 @@ static bool find_gid_index(const union ib_gid *gid,
 }
 
 static int get_sgid_index_from_eth(struct ib_device *device, u8 port_num,
-				   u16 vlan_id, const union ib_gid *sgid,
+				   u16 vlan_id, union ib_gid *sgid,
 				   enum ib_gid_type gid_type,
 				   u16 *gid_index)
 {
@@ -421,26 +302,25 @@ static int get_gids_from_rdma_hdr(union rdma_network_hdr *hdr,
 		*dgid = hdr->ibgrh.dgid;
 		*sgid = hdr->ibgrh.sgid;
 		return 0;
-	} else {
+	} else
 		return -EINVAL;
-	}
 }
 
-int ib_init_ah_from_wc(struct ib_device *device, u8 port_num,
-		       const struct ib_wc *wc, const struct ib_grh *grh,
-		       struct ib_ah_attr *ah_attr)
+int ib_init_ah_from_wc(struct ib_device *device, u8 port_num, struct ib_wc *wc,
+		       struct ib_grh *grh, struct ib_ah_attr *ah_attr)
 {
 	u32 flow_class;
 	u16 gid_index;
 	int ret;
+	int is_eth = (rdma_port_get_link_layer(device, port_num) ==
+			IB_LINK_LAYER_ETHERNET);
 	enum rdma_network_type net_type = RDMA_NETWORK_IB;
 	enum ib_gid_type gid_type = IB_GID_TYPE_IB;
-	int hoplimit = 0xff;
 	union ib_gid dgid;
 	union ib_gid sgid;
 
 	memset(ah_attr, 0, sizeof *ah_attr);
-	if (rdma_cap_eth_ah(device, port_num)) {
+	if (is_eth) {
 		if (wc->wc_flags & IB_WC_WITH_NETWORK_HDR_TYPE)
 			net_type = wc->network_hdr_type;
 		else
@@ -452,53 +332,31 @@ int ib_init_ah_from_wc(struct ib_device *device, u8 port_num,
 	if (ret)
 		return ret;
 
-	if (rdma_protocol_roce(device, port_num)) {
-		int if_index = 0;
+	if (is_eth) {
 		u16 vlan_id = wc->wc_flags & IB_WC_WITH_VLAN ?
 				wc->vlan_id : 0xffff;
-		struct net_device *idev;
-		struct net_device *resolved_dev;
 
 		if (!(wc->wc_flags & IB_WC_GRH))
 			return -EPROTOTYPE;
 
-		if (!device->get_netdev)
-			return -EOPNOTSUPP;
-
-		idev = device->get_netdev(device, port_num);
-		if (!idev)
-			return -ENODEV;
-
-		ret = rdma_addr_find_l2_eth_by_grh(&dgid, &sgid,
-						   ah_attr->dmac,
-						   wc->wc_flags & IB_WC_WITH_VLAN ?
-						   NULL : &vlan_id,
-						   &if_index, &hoplimit);
-		if (ret) {
-			dev_put(idev);
-			return ret;
+		if (!(wc->wc_flags & IB_WC_WITH_SMAC) ||
+		    !(wc->wc_flags & IB_WC_WITH_VLAN)) {
+			ret = rdma_addr_find_dmac_by_grh(&dgid, &sgid,
+							 ah_attr->dmac,
+							 wc->wc_flags & IB_WC_WITH_VLAN ?
+							 NULL : &vlan_id,
+							 0);
+			if (ret)
+				return ret;
 		}
-
-		resolved_dev = dev_get_by_index(&init_net, if_index);
-		if (resolved_dev->flags & IFF_LOOPBACK) {
-			dev_put(resolved_dev);
-			resolved_dev = idev;
-			dev_hold(resolved_dev);
-		}
-		rcu_read_lock();
-		if (resolved_dev != idev && !rdma_is_upper_dev_rcu(idev,
-								   resolved_dev))
-			ret = -EHOSTUNREACH;
-		rcu_read_unlock();
-		dev_put(idev);
-		dev_put(resolved_dev);
-		if (ret)
-			return ret;
 
 		ret = get_sgid_index_from_eth(device, port_num, vlan_id,
 					      &dgid, gid_type, &gid_index);
 		if (ret)
 			return ret;
+
+		if (wc->wc_flags & IB_WC_WITH_SMAC)
+			memcpy(ah_attr->dmac, wc->smac, ETH_ALEN);
 	}
 
 	ah_attr->dlid = wc->slid;
@@ -510,10 +368,10 @@ int ib_init_ah_from_wc(struct ib_device *device, u8 port_num,
 		ah_attr->ah_flags = IB_AH_GRH;
 		ah_attr->grh.dgid = sgid;
 
-		if (!rdma_cap_eth_ah(device, port_num)) {
+		if (!is_eth) {
 			ret = ib_find_cached_gid_by_port(device, &dgid,
 							 IB_GID_TYPE_IB,
-							 port_num, NULL,
+							 port_num, NULL, 0,
 							 &gid_index);
 			if (ret)
 				return ret;
@@ -522,15 +380,15 @@ int ib_init_ah_from_wc(struct ib_device *device, u8 port_num,
 		ah_attr->grh.sgid_index = (u8) gid_index;
 		flow_class = be32_to_cpu(grh->version_tclass_flow);
 		ah_attr->grh.flow_label = flow_class & 0xFFFFF;
-		ah_attr->grh.hop_limit = hoplimit;
+		ah_attr->grh.hop_limit = 0xFF;
 		ah_attr->grh.traffic_class = (flow_class >> 20) & 0xFF;
 	}
 	return 0;
 }
 EXPORT_SYMBOL(ib_init_ah_from_wc);
 
-struct ib_ah *ib_create_ah_from_wc(struct ib_pd *pd, const struct ib_wc *wc,
-				   const struct ib_grh *grh, u8 port_num)
+struct ib_ah *ib_create_ah_from_wc(struct ib_pd *pd, struct ib_wc *wc,
+				   struct ib_grh *grh, u8 port_num)
 {
 	struct ib_ah_attr ah_attr;
 	int ret;
@@ -724,89 +582,59 @@ struct ib_qp *ib_open_qp(struct ib_xrcd *xrcd,
 }
 EXPORT_SYMBOL(ib_open_qp);
 
-static struct ib_qp *ib_create_xrc_qp(struct ib_qp *qp,
-		struct ib_qp_init_attr *qp_init_attr)
-{
-	struct ib_qp *real_qp = qp;
-
-	qp->event_handler = __ib_shared_qp_event_handler;
-	qp->qp_context = qp;
-	qp->pd = NULL;
-	qp->send_cq = qp->recv_cq = NULL;
-	qp->srq = NULL;
-	qp->xrcd = qp_init_attr->xrcd;
-	atomic_inc(&qp_init_attr->xrcd->usecnt);
-	INIT_LIST_HEAD(&qp->open_list);
-
-	qp = __ib_open_qp(real_qp, qp_init_attr->event_handler,
-			  qp_init_attr->qp_context);
-	if (!IS_ERR(qp))
-		__ib_insert_xrcd_qp(qp_init_attr->xrcd, real_qp);
-	else
-		real_qp->device->destroy_qp(real_qp);
-	return qp;
-}
-
 struct ib_qp *ib_create_qp(struct ib_pd *pd,
 			   struct ib_qp_init_attr *qp_init_attr)
 {
-	struct ib_device *device = pd ? pd->device : qp_init_attr->xrcd->device;
-	struct ib_qp *qp;
-	int ret;
+	struct ib_qp *qp, *real_qp;
+	struct ib_device *device;
 
-	/*
-	 * If the callers is using the RDMA API calculate the resources
-	 * needed for the RDMA READ/WRITE operations.
-	 *
-	 * Note that these callers need to pass in a port number.
-	 */
-	if (qp_init_attr->cap.max_rdma_ctxs)
-		rdma_rw_init_qp(device, qp_init_attr);
-
+	device = pd ? pd->device : qp_init_attr->xrcd->device;
 	qp = device->create_qp(pd, qp_init_attr, NULL);
-	if (IS_ERR(qp))
-		return qp;
 
-	qp->device     = device;
-	qp->real_qp    = qp;
-	qp->uobject    = NULL;
-	qp->qp_type    = qp_init_attr->qp_type;
+	if (!IS_ERR(qp)) {
+		qp->device     = device;
+		qp->real_qp    = qp;
+		qp->uobject    = NULL;
+		qp->qp_type    = qp_init_attr->qp_type;
 
-	atomic_set(&qp->usecnt, 0);
-	qp->mrs_used = 0;
-	spin_lock_init(&qp->mr_lock);
-	INIT_LIST_HEAD(&qp->rdma_mrs);
-	INIT_LIST_HEAD(&qp->sig_mrs);
+		atomic_set(&qp->usecnt, 0);
+		if (qp_init_attr->qp_type == IB_QPT_XRC_TGT) {
+			qp->event_handler = __ib_shared_qp_event_handler;
+			qp->qp_context = qp;
+			qp->pd = NULL;
+			qp->send_cq = qp->recv_cq = NULL;
+			qp->srq = NULL;
+			qp->xrcd = qp_init_attr->xrcd;
+			atomic_inc(&qp_init_attr->xrcd->usecnt);
+			INIT_LIST_HEAD(&qp->open_list);
 
-	if (qp_init_attr->qp_type == IB_QPT_XRC_TGT)
-		return ib_create_xrc_qp(qp, qp_init_attr);
+			real_qp = qp;
+			qp = __ib_open_qp(real_qp, qp_init_attr->event_handler,
+					  qp_init_attr->qp_context);
+			if (!IS_ERR(qp))
+				__ib_insert_xrcd_qp(qp_init_attr->xrcd, real_qp);
+			else
+				real_qp->device->destroy_qp(real_qp);
+		} else {
+			qp->event_handler = qp_init_attr->event_handler;
+			qp->qp_context = qp_init_attr->qp_context;
+			if (qp_init_attr->qp_type == IB_QPT_XRC_INI) {
+				qp->recv_cq = NULL;
+				qp->srq = NULL;
+			} else {
+				qp->recv_cq = qp_init_attr->recv_cq;
+				atomic_inc(&qp_init_attr->recv_cq->usecnt);
+				qp->srq = qp_init_attr->srq;
+				if (qp->srq)
+					atomic_inc(&qp_init_attr->srq->usecnt);
+			}
 
-	qp->event_handler = qp_init_attr->event_handler;
-	qp->qp_context = qp_init_attr->qp_context;
-	if (qp_init_attr->qp_type == IB_QPT_XRC_INI) {
-		qp->recv_cq = NULL;
-		qp->srq = NULL;
-	} else {
-		qp->recv_cq = qp_init_attr->recv_cq;
-		atomic_inc(&qp_init_attr->recv_cq->usecnt);
-		qp->srq = qp_init_attr->srq;
-		if (qp->srq)
-			atomic_inc(&qp_init_attr->srq->usecnt);
-	}
+			qp->pd	    = pd;
+			qp->send_cq = qp_init_attr->send_cq;
+			qp->xrcd    = NULL;
 
-	qp->pd	    = pd;
-	qp->send_cq = qp_init_attr->send_cq;
-	qp->xrcd    = NULL;
-
-	atomic_inc(&pd->usecnt);
-	atomic_inc(&qp_init_attr->send_cq->usecnt);
-
-	if (qp_init_attr->cap.max_rdma_ctxs) {
-		ret = rdma_rw_init_mrs(qp, qp_init_attr);
-		if (ret) {
-			pr_err("failed to init MR pool ret= %d\n", ret);
-			ib_destroy_qp(qp);
-			qp = ERR_PTR(ret);
+			atomic_inc(&pd->usecnt);
+			atomic_inc(&qp_init_attr->send_cq->usecnt);
 		}
 	}
 
@@ -1154,15 +982,13 @@ int ib_resolve_eth_dmac(struct ib_qp *qp,
 			struct ib_qp_attr *qp_attr, int *qp_attr_mask)
 {
 	int           ret = 0;
+	u8	      start_port = qp->device->node_type == RDMA_NODE_IB_SWITCH ? 0 : 1;
 
-	if (*qp_attr_mask & IB_QP_AV) {
-		if (qp_attr->ah_attr.port_num < rdma_start_port(qp->device) ||
-		    qp_attr->ah_attr.port_num > rdma_end_port(qp->device))
-			return -EINVAL;
-
-		if (!rdma_cap_eth_ah(qp->device, qp_attr->ah_attr.port_num))
-			return 0;
-
+	if ((*qp_attr_mask & IB_QP_AV)  &&
+	    (qp_attr->ah_attr.port_num >= start_port) &&
+	    (qp_attr->ah_attr.port_num < start_port + qp->device->phys_port_cnt) &&
+	    (rdma_port_get_link_layer(qp->device, qp_attr->ah_attr.port_num) ==
+	     IB_LINK_LAYER_ETHERNET)) {
 		if (rdma_link_local_addr((struct in6_addr *)qp_attr->ah_attr.grh.dgid.raw)) {
 			rdma_get_ll_mac((struct in6_addr *)qp_attr->ah_attr.grh.dgid.raw,
 					qp_attr->ah_attr.dmac);
@@ -1170,8 +996,8 @@ int ib_resolve_eth_dmac(struct ib_qp *qp,
 			union ib_gid		sgid;
 			struct ib_gid_attr	sgid_attr;
 			int			ifindex;
-			int			hop_limit;
 
+			rcu_read_lock();
 			ret = ib_query_gid(qp->device,
 					   qp_attr->ah_attr.port_num,
 					   qp_attr->ah_attr.grh.sgid_index,
@@ -1180,19 +1006,24 @@ int ib_resolve_eth_dmac(struct ib_qp *qp,
 			if (ret || !sgid_attr.ndev) {
 				if (!ret)
 					ret = -ENXIO;
+				rcu_read_unlock();
 				goto out;
 			}
+			if (sgid_attr.gid_type == IB_GID_TYPE_IBOE_V2)
+				qp_attr->ah_attr.grh.hop_limit =
+							IPV6_DEFAULT_HOPLIMIT;
 
+			dev_hold(sgid_attr.ndev);
 			ifindex = sgid_attr.ndev->ifindex;
 
-			ret = rdma_addr_find_l2_eth_by_grh(&sgid,
-							   &qp_attr->ah_attr.grh.dgid,
-							   qp_attr->ah_attr.dmac,
-							   NULL, &ifindex, &hop_limit);
+			rcu_read_unlock();
+
+			ret = rdma_addr_find_dmac_by_grh(&sgid,
+							 &qp_attr->ah_attr.grh.dgid,
+							 qp_attr->ah_attr.dmac,
+							 NULL, ifindex);
 
 			dev_put(sgid_attr.ndev);
-
-			qp_attr->ah_attr.grh.hop_limit = hop_limit;
 		}
 	}
 out:
@@ -1281,8 +1112,6 @@ int ib_destroy_qp(struct ib_qp *qp)
 	struct ib_srq *srq;
 	int ret;
 
-	WARN_ON_ONCE(qp->mrs_used > 0);
-
 	if (atomic_read(&qp->usecnt))
 		return -EBUSY;
 
@@ -1293,9 +1122,6 @@ int ib_destroy_qp(struct ib_qp *qp)
 	scq  = qp->send_cq;
 	rcq  = qp->recv_cq;
 	srq  = qp->srq;
-
-	if (!qp->uobject)
-		rdma_rw_cleanup_mrs(qp);
 
 	ret = qp->device->destroy_qp(qp);
 	if (!ret) {
@@ -1318,12 +1144,11 @@ EXPORT_SYMBOL(ib_destroy_qp);
 struct ib_cq *ib_create_cq(struct ib_device *device,
 			   ib_comp_handler comp_handler,
 			   void (*event_handler)(struct ib_event *, void *),
-			   void *cq_context,
-			   const struct ib_cq_init_attr *cq_attr)
+			   void *cq_context, int cqe, int comp_vector)
 {
 	struct ib_cq *cq;
 
-	cq = device->create_cq(device, cq_attr, NULL, NULL);
+	cq = device->create_cq(device, cqe, comp_vector, NULL, NULL);
 
 	if (!IS_ERR(cq)) {
 		cq->device        = device;
@@ -1379,18 +1204,96 @@ struct ib_mr *ib_get_dma_mr(struct ib_pd *pd, int mr_access_flags)
 		mr->pd      = pd;
 		mr->uobject = NULL;
 		atomic_inc(&pd->usecnt);
-		mr->need_inval = false;
+		atomic_set(&mr->usecnt, 0);
 	}
 
 	return mr;
 }
 EXPORT_SYMBOL(ib_get_dma_mr);
 
-int ib_dereg_mr(struct ib_mr *mr)
+struct ib_mr *ib_reg_phys_mr(struct ib_pd *pd,
+			     struct ib_phys_buf *phys_buf_array,
+			     int num_phys_buf,
+			     int mr_access_flags,
+			     u64 *iova_start)
 {
-	struct ib_pd *pd = mr->pd;
+	struct ib_mr *mr;
+	int err;
+
+	err = ib_check_mr_access(mr_access_flags);
+	if (err)
+		return ERR_PTR(err);
+
+	if (!pd->device->reg_phys_mr)
+		return ERR_PTR(-ENOSYS);
+
+	mr = pd->device->reg_phys_mr(pd, phys_buf_array, num_phys_buf,
+				     mr_access_flags, iova_start);
+
+	if (!IS_ERR(mr)) {
+		mr->device  = pd->device;
+		mr->pd      = pd;
+		mr->uobject = NULL;
+		atomic_inc(&pd->usecnt);
+		atomic_set(&mr->usecnt, 0);
+	}
+
+	return mr;
+}
+EXPORT_SYMBOL(ib_reg_phys_mr);
+
+int ib_rereg_phys_mr(struct ib_mr *mr,
+		     int mr_rereg_mask,
+		     struct ib_pd *pd,
+		     struct ib_phys_buf *phys_buf_array,
+		     int num_phys_buf,
+		     int mr_access_flags,
+		     u64 *iova_start)
+{
+	struct ib_pd *old_pd;
 	int ret;
 
+	ret = ib_check_mr_access(mr_access_flags);
+	if (ret)
+		return ret;
+
+	if (!mr->device->rereg_phys_mr)
+		return -ENOSYS;
+
+	if (atomic_read(&mr->usecnt))
+		return -EBUSY;
+
+	old_pd = mr->pd;
+
+	ret = mr->device->rereg_phys_mr(mr, mr_rereg_mask, pd,
+					phys_buf_array, num_phys_buf,
+					mr_access_flags, iova_start);
+
+	if (!ret && (mr_rereg_mask & IB_MR_REREG_PD)) {
+		atomic_dec(&old_pd->usecnt);
+		atomic_inc(&pd->usecnt);
+	}
+
+	return ret;
+}
+EXPORT_SYMBOL(ib_rereg_phys_mr);
+
+int ib_query_mr(struct ib_mr *mr, struct ib_mr_attr *mr_attr)
+{
+	return mr->device->query_mr ?
+		mr->device->query_mr(mr, mr_attr) : -ENOSYS;
+}
+EXPORT_SYMBOL(ib_query_mr);
+
+int ib_dereg_mr(struct ib_mr *mr)
+{
+	struct ib_pd *pd;
+	int ret;
+
+	if (atomic_read(&mr->usecnt))
+		return -EBUSY;
+
+	pd = mr->pd;
 	ret = mr->device->dereg_mr(mr);
 	if (!ret)
 		atomic_dec(&pd->usecnt);
@@ -1399,39 +1302,126 @@ int ib_dereg_mr(struct ib_mr *mr)
 }
 EXPORT_SYMBOL(ib_dereg_mr);
 
-/**
- * ib_alloc_mr() - Allocates a memory region
- * @pd:            protection domain associated with the region
- * @mr_type:       memory region type
- * @max_num_sg:    maximum sg entries available for registration.
- *
- * Notes:
- * Memory registeration page/sg lists must not exceed max_num_sg.
- * For mr_type IB_MR_TYPE_MEM_REG, the total length cannot exceed
- * max_num_sg * used_page_size.
- *
- */
-struct ib_mr *ib_alloc_mr(struct ib_pd *pd,
-			  enum ib_mr_type mr_type,
-			  u32 max_num_sg)
+struct ib_mr *ib_create_mr(struct ib_pd *pd,
+			   struct ib_mr_init_attr *mr_init_attr)
 {
 	struct ib_mr *mr;
 
-	if (!pd->device->alloc_mr)
+	if (!pd->device->create_mr)
 		return ERR_PTR(-ENOSYS);
 
-	mr = pd->device->alloc_mr(pd, mr_type, max_num_sg);
+	mr = pd->device->create_mr(pd, mr_init_attr);
+
 	if (!IS_ERR(mr)) {
 		mr->device  = pd->device;
 		mr->pd      = pd;
 		mr->uobject = NULL;
 		atomic_inc(&pd->usecnt);
-		mr->need_inval = false;
+		atomic_set(&mr->usecnt, 0);
 	}
 
 	return mr;
 }
-EXPORT_SYMBOL(ib_alloc_mr);
+EXPORT_SYMBOL(ib_create_mr);
+
+int ib_destroy_mr(struct ib_mr *mr)
+{
+	struct ib_pd *pd;
+	int ret;
+
+	if (atomic_read(&mr->usecnt))
+		return -EBUSY;
+
+	pd = mr->pd;
+	ret = mr->device->destroy_mr(mr);
+	if (!ret)
+		atomic_dec(&pd->usecnt);
+
+	return ret;
+}
+EXPORT_SYMBOL(ib_destroy_mr);
+
+struct ib_mr *ib_alloc_fast_reg_mr(struct ib_pd *pd, int max_page_list_len)
+{
+	struct ib_mr *mr;
+
+	if (!pd->device->alloc_fast_reg_mr)
+		return ERR_PTR(-ENOSYS);
+
+	mr = pd->device->alloc_fast_reg_mr(pd, max_page_list_len);
+
+	if (!IS_ERR(mr)) {
+		mr->device  = pd->device;
+		mr->pd      = pd;
+		mr->uobject = NULL;
+		atomic_inc(&pd->usecnt);
+		atomic_set(&mr->usecnt, 0);
+	}
+
+	return mr;
+}
+EXPORT_SYMBOL(ib_alloc_fast_reg_mr);
+
+struct ib_fast_reg_page_list *ib_alloc_fast_reg_page_list(struct ib_device *device,
+							  int max_page_list_len)
+{
+	struct ib_fast_reg_page_list *page_list;
+
+	if (!device->alloc_fast_reg_page_list)
+		return ERR_PTR(-ENOSYS);
+
+	page_list = device->alloc_fast_reg_page_list(device, max_page_list_len);
+
+	if (!IS_ERR(page_list)) {
+		page_list->device = device;
+		page_list->max_page_list_len = max_page_list_len;
+	}
+
+	return page_list;
+}
+EXPORT_SYMBOL(ib_alloc_fast_reg_page_list);
+
+void ib_free_fast_reg_page_list(struct ib_fast_reg_page_list *page_list)
+{
+	page_list->device->free_fast_reg_page_list(page_list);
+}
+EXPORT_SYMBOL(ib_free_fast_reg_page_list);
+
+/* Memory windows */
+
+struct ib_mw *ib_alloc_mw(struct ib_pd *pd, enum ib_mw_type type)
+{
+	struct ib_mw *mw;
+
+	if (!pd->device->alloc_mw)
+		return ERR_PTR(-ENOSYS);
+
+	mw = pd->device->alloc_mw(pd, type);
+	if (!IS_ERR(mw)) {
+		mw->device  = pd->device;
+		mw->pd      = pd;
+		mw->uobject = NULL;
+		mw->type    = type;
+		atomic_inc(&pd->usecnt);
+	}
+
+	return mw;
+}
+EXPORT_SYMBOL(ib_alloc_mw);
+
+int ib_dealloc_mw(struct ib_mw *mw)
+{
+	struct ib_pd *pd;
+	int ret;
+
+	pd = mw->pd;
+	ret = mw->device->dealloc_mw(mw);
+	if (!ret)
+		atomic_dec(&pd->usecnt);
+
+	return ret;
+}
+EXPORT_SYMBOL(ib_dealloc_mw);
 
 /* "Fast" memory regions */
 
@@ -1588,333 +1578,3 @@ int ib_check_mr_status(struct ib_mr *mr, u32 check_mask,
 		mr->device->check_mr_status(mr, check_mask, mr_status) : -ENOSYS;
 }
 EXPORT_SYMBOL(ib_check_mr_status);
-
-int ib_set_vf_link_state(struct ib_device *device, int vf, u8 port,
-			 int state)
-{
-	if (!device->set_vf_link_state)
-		return -ENOSYS;
-
-	return device->set_vf_link_state(device, vf, port, state);
-}
-EXPORT_SYMBOL(ib_set_vf_link_state);
-
-int ib_get_vf_config(struct ib_device *device, int vf, u8 port,
-		     struct ifla_vf_info *info)
-{
-	if (!device->get_vf_config)
-		return -ENOSYS;
-
-	return device->get_vf_config(device, vf, port, info);
-}
-EXPORT_SYMBOL(ib_get_vf_config);
-
-int ib_get_vf_stats(struct ib_device *device, int vf, u8 port,
-		    struct ifla_vf_stats *stats)
-{
-	if (!device->get_vf_stats)
-		return -ENOSYS;
-
-	return device->get_vf_stats(device, vf, port, stats);
-}
-EXPORT_SYMBOL(ib_get_vf_stats);
-
-int ib_set_vf_guid(struct ib_device *device, int vf, u8 port, u64 guid,
-		   int type)
-{
-	if (!device->set_vf_guid)
-		return -ENOSYS;
-
-	return device->set_vf_guid(device, vf, port, guid, type);
-}
-EXPORT_SYMBOL(ib_set_vf_guid);
-
-/**
- * ib_map_mr_sg() - Map the largest prefix of a dma mapped SG list
- *     and set it the memory region.
- * @mr:            memory region
- * @sg:            dma mapped scatterlist
- * @sg_nents:      number of entries in sg
- * @sg_offset:     offset in bytes into sg
- * @page_size:     page vector desired page size
- *
- * Constraints:
- * - The first sg element is allowed to have an offset.
- * - Each sg element must be aligned to page_size (or physically
- *   contiguous to the previous element). In case an sg element has a
- *   non contiguous offset, the mapping prefix will not include it.
- * - The last sg element is allowed to have length less than page_size.
- * - If sg_nents total byte length exceeds the mr max_num_sge * page_size
- *   then only max_num_sg entries will be mapped.
- * - If the MR was allocated with type IB_MR_TYPE_SG_GAPS_REG, non of these
- *   constraints holds and the page_size argument is ignored.
- *
- * Returns the number of sg elements that were mapped to the memory region.
- *
- * After this completes successfully, the  memory region
- * is ready for registration.
- */
-int ib_map_mr_sg(struct ib_mr *mr, struct scatterlist *sg, int sg_nents,
-		 unsigned int *sg_offset, unsigned int page_size)
-{
-	if (unlikely(!mr->device->map_mr_sg))
-		return -ENOSYS;
-
-	mr->page_size = page_size;
-
-	return mr->device->map_mr_sg(mr, sg, sg_nents, sg_offset);
-}
-EXPORT_SYMBOL(ib_map_mr_sg);
-
-/**
- * ib_sg_to_pages() - Convert the largest prefix of a sg list
- *     to a page vector
- * @mr:            memory region
- * @sgl:           dma mapped scatterlist
- * @sg_nents:      number of entries in sg
- * @sg_offset_p:   IN:  start offset in bytes into sg
- *                 OUT: offset in bytes for element n of the sg of the first
- *                      byte that has not been processed where n is the return
- *                      value of this function.
- * @set_page:      driver page assignment function pointer
- *
- * Core service helper for drivers to convert the largest
- * prefix of given sg list to a page vector. The sg list
- * prefix converted is the prefix that meet the requirements
- * of ib_map_mr_sg.
- *
- * Returns the number of sg elements that were assigned to
- * a page vector.
- */
-int ib_sg_to_pages(struct ib_mr *mr, struct scatterlist *sgl, int sg_nents,
-		unsigned int *sg_offset_p, int (*set_page)(struct ib_mr *, u64))
-{
-	struct scatterlist *sg;
-	u64 last_end_dma_addr = 0;
-	unsigned int sg_offset = sg_offset_p ? *sg_offset_p : 0;
-	unsigned int last_page_off = 0;
-	u64 page_mask = ~((u64)mr->page_size - 1);
-	int i, ret;
-
-	if (unlikely(sg_nents <= 0 || sg_offset > sg_dma_len(&sgl[0])))
-		return -EINVAL;
-
-	mr->iova = sg_dma_address(&sgl[0]) + sg_offset;
-	mr->length = 0;
-
-	for_each_sg(sgl, sg, sg_nents, i) {
-		u64 dma_addr = sg_dma_address(sg) + sg_offset;
-		u64 prev_addr = dma_addr;
-		unsigned int dma_len = sg_dma_len(sg) - sg_offset;
-		u64 end_dma_addr = dma_addr + dma_len;
-		u64 page_addr = dma_addr & page_mask;
-
-		/*
-		 * For the second and later elements, check whether either the
-		 * end of element i-1 or the start of element i is not aligned
-		 * on a page boundary.
-		 */
-		if (i && (last_page_off != 0 || page_addr != dma_addr)) {
-			/* Stop mapping if there is a gap. */
-			if (last_end_dma_addr != dma_addr)
-				break;
-
-			/*
-			 * Coalesce this element with the last. If it is small
-			 * enough just update mr->length. Otherwise start
-			 * mapping from the next page.
-			 */
-			goto next_page;
-		}
-
-		do {
-			ret = set_page(mr, page_addr);
-			if (unlikely(ret < 0)) {
-				sg_offset = prev_addr - sg_dma_address(sg);
-				mr->length += prev_addr - dma_addr;
-				if (sg_offset_p)
-					*sg_offset_p = sg_offset;
-				return i || sg_offset ? i : ret;
-			}
-			prev_addr = page_addr;
-next_page:
-			page_addr += mr->page_size;
-		} while (page_addr < end_dma_addr);
-
-		mr->length += dma_len;
-		last_end_dma_addr = end_dma_addr;
-		last_page_off = end_dma_addr & ~page_mask;
-
-		sg_offset = 0;
-	}
-
-	if (sg_offset_p)
-		*sg_offset_p = 0;
-	return i;
-}
-EXPORT_SYMBOL(ib_sg_to_pages);
-
-struct ib_drain_cqe {
-	struct ib_cqe cqe;
-	struct completion done;
-};
-
-static void ib_drain_qp_done(struct ib_cq *cq, struct ib_wc *wc)
-{
-	struct ib_drain_cqe *cqe = container_of(wc->wr_cqe, struct ib_drain_cqe,
-						cqe);
-
-	complete(&cqe->done);
-}
-
-/*
- * Post a WR and block until its completion is reaped for the SQ.
- */
-static void __ib_drain_sq(struct ib_qp *qp)
-{
-	struct ib_qp_attr attr = { .qp_state = IB_QPS_ERR };
-	struct ib_drain_cqe sdrain;
-	struct ib_send_wr swr = {}, *bad_swr;
-	int ret;
-
-	if (qp->send_cq->poll_ctx == IB_POLL_DIRECT) {
-		WARN_ONCE(qp->send_cq->poll_ctx == IB_POLL_DIRECT,
-			  "IB_POLL_DIRECT poll_ctx not supported for drain\n");
-		return;
-	}
-
-	swr.wr_cqe = &sdrain.cqe;
-	sdrain.cqe.done = ib_drain_qp_done;
-	init_completion(&sdrain.done);
-
-	ret = ib_modify_qp(qp, &attr, IB_QP_STATE);
-	if (ret) {
-		WARN_ONCE(ret, "failed to drain send queue: %d\n", ret);
-		return;
-	}
-
-	ret = ib_post_send(qp, &swr, &bad_swr);
-	if (ret) {
-		WARN_ONCE(ret, "failed to drain send queue: %d\n", ret);
-		return;
-	}
-
-	wait_for_completion(&sdrain.done);
-}
-
-/*
- * Post a WR and block until its completion is reaped for the RQ.
- */
-static void __ib_drain_rq(struct ib_qp *qp)
-{
-	struct ib_qp_attr attr = { .qp_state = IB_QPS_ERR };
-	struct ib_drain_cqe rdrain;
-	struct ib_recv_wr rwr = {}, *bad_rwr;
-	int ret;
-
-	if (qp->recv_cq->poll_ctx == IB_POLL_DIRECT) {
-		WARN_ONCE(qp->recv_cq->poll_ctx == IB_POLL_DIRECT,
-			  "IB_POLL_DIRECT poll_ctx not supported for drain\n");
-		return;
-	}
-
-	rwr.wr_cqe = &rdrain.cqe;
-	rdrain.cqe.done = ib_drain_qp_done;
-	init_completion(&rdrain.done);
-
-	ret = ib_modify_qp(qp, &attr, IB_QP_STATE);
-	if (ret) {
-		WARN_ONCE(ret, "failed to drain recv queue: %d\n", ret);
-		return;
-	}
-
-	ret = ib_post_recv(qp, &rwr, &bad_rwr);
-	if (ret) {
-		WARN_ONCE(ret, "failed to drain recv queue: %d\n", ret);
-		return;
-	}
-
-	wait_for_completion(&rdrain.done);
-}
-
-/**
- * ib_drain_sq() - Block until all SQ CQEs have been consumed by the
- *		   application.
- * @qp:            queue pair to drain
- *
- * If the device has a provider-specific drain function, then
- * call that.  Otherwise call the generic drain function
- * __ib_drain_sq().
- *
- * The caller must:
- *
- * ensure there is room in the CQ and SQ for the drain work request and
- * completion.
- *
- * allocate the CQ using ib_alloc_cq() and the CQ poll context cannot be
- * IB_POLL_DIRECT.
- *
- * ensure that there are no other contexts that are posting WRs concurrently.
- * Otherwise the drain is not guaranteed.
- */
-void ib_drain_sq(struct ib_qp *qp)
-{
-	if (qp->device->drain_sq)
-		qp->device->drain_sq(qp);
-	else
-		__ib_drain_sq(qp);
-}
-EXPORT_SYMBOL(ib_drain_sq);
-
-/**
- * ib_drain_rq() - Block until all RQ CQEs have been consumed by the
- *		   application.
- * @qp:            queue pair to drain
- *
- * If the device has a provider-specific drain function, then
- * call that.  Otherwise call the generic drain function
- * __ib_drain_rq().
- *
- * The caller must:
- *
- * ensure there is room in the CQ and RQ for the drain work request and
- * completion.
- *
- * allocate the CQ using ib_alloc_cq() and the CQ poll context cannot be
- * IB_POLL_DIRECT.
- *
- * ensure that there are no other contexts that are posting WRs concurrently.
- * Otherwise the drain is not guaranteed.
- */
-void ib_drain_rq(struct ib_qp *qp)
-{
-	if (qp->device->drain_rq)
-		qp->device->drain_rq(qp);
-	else
-		__ib_drain_rq(qp);
-}
-EXPORT_SYMBOL(ib_drain_rq);
-
-/**
- * ib_drain_qp() - Block until all CQEs have been consumed by the
- *		   application on both the RQ and SQ.
- * @qp:            queue pair to drain
- *
- * The caller must:
- *
- * ensure there is room in the CQ(s), SQ, and RQ for drain work requests
- * and completions.
- *
- * allocate the CQs using ib_alloc_cq() and the CQ poll context cannot be
- * IB_POLL_DIRECT.
- *
- * ensure that there are no other contexts that are posting WRs concurrently.
- * Otherwise the drain is not guaranteed.
- */
-void ib_drain_qp(struct ib_qp *qp)
-{
-	ib_drain_sq(qp);
-	if (!qp->srq)
-		ib_drain_rq(qp);
-}
-EXPORT_SYMBOL(ib_drain_qp);

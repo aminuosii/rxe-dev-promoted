@@ -37,8 +37,6 @@ EXPORT_SYMBOL(__copy_user_nocache);
 EXPORT_SYMBOL(_copy_from_user);
 EXPORT_SYMBOL(_copy_to_user);
 
-EXPORT_SYMBOL_GPL(memcpy_mcsafe);
-
 EXPORT_SYMBOL(copy_page);
 EXPORT_SYMBOL(clear_page);
 
@@ -77,5 +75,7 @@ EXPORT_SYMBOL(native_load_gs_index);
 
 #ifdef CONFIG_PREEMPT
 EXPORT_SYMBOL(___preempt_schedule);
-EXPORT_SYMBOL(___preempt_schedule_notrace);
+#ifdef CONFIG_CONTEXT_TRACKING
+EXPORT_SYMBOL(___preempt_schedule_context);
+#endif
 #endif

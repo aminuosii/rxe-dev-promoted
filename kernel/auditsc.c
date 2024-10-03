@@ -180,7 +180,7 @@ static int audit_match_filetype(struct audit_context *ctx, int val)
 		return 0;
 
 	list_for_each_entry(n, &ctx->names_list, list) {
-		if ((n->ino != AUDIT_INO_UNSET) &&
+		if ((n->ino != -1) &&
 		    ((n->mode & S_IFMT) == mode))
 			return 1;
 	}
@@ -466,9 +466,6 @@ static int audit_filter_rules(struct task_struct *tsk,
 				result = audit_comparator(ctx->ppid, f->op, f->val);
 			}
 			break;
-		case AUDIT_EXE:
-			result = audit_exe_compare(tsk, rule->exe);
-			break;
 		case AUDIT_UID:
 			result = audit_uid_comparator(cred->uid, f->op, f->uid);
 			break;
@@ -602,7 +599,9 @@ static int audit_filter_rules(struct task_struct *tsk,
 				result = match_tree_refs(ctx, rule->tree);
 			break;
 		case AUDIT_LOGINUID:
-			result = audit_uid_comparator(tsk->loginuid, f->op, f->uid);
+			result = 0;
+			if (ctx)
+				result = audit_uid_comparator(tsk->loginuid, f->op, f->uid);
 			break;
 		case AUDIT_LOGINUID_SET:
 			result = audit_comparator(audit_loginuid_set(tsk), f->op, f->val);
@@ -1024,7 +1023,8 @@ static int audit_log_single_execve_arg(struct audit_context *context,
 	 * for strings that are too long, we should not have created
 	 * any.
 	 */
-	if (WARN_ON_ONCE(len < 0 || len > MAX_ARG_STRLEN - 1)) {
+	if (unlikely((len == -1) || len > MAX_ARG_STRLEN - 1)) {
+		WARN_ON(1);
 		send_sig(SIGKILL, current, 0);
 		return -1;
 	}
@@ -1629,7 +1629,7 @@ retry:
 	rcu_read_lock();
 	seq = read_seqbegin(&rename_lock);
 	for(;;) {
-		struct inode *inode = d_backing_inode(d);
+		struct inode *inode = d->d_inode;
 		if (inode && unlikely(!hlist_empty(&inode->i_fsnotify_marks))) {
 			struct audit_chunk *chunk;
 			chunk = audit_tree_lookup(inode);
@@ -1683,7 +1683,7 @@ static struct audit_names *audit_alloc_name(struct audit_context *context,
 		aname->should_free = true;
 	}
 
-	aname->ino = AUDIT_INO_UNSET;
+	aname->ino = (unsigned long)-1;
 	aname->type = type;
 	list_add_tail(&aname->list, &context->names_list);
 
@@ -1754,7 +1754,7 @@ void __audit_inode(struct filename *name, const struct dentry *dentry,
 		   unsigned int flags)
 {
 	struct audit_context *context = current->audit_context;
-	struct inode *inode = d_backing_inode(dentry);
+	const struct inode *inode = dentry->d_inode;
 	struct audit_names *n;
 	bool parent = flags & AUDIT_INODE_PARENT;
 
@@ -1848,12 +1848,12 @@ void __audit_file(const struct file *file)
  * must be hooked prior, in order to capture the target inode during
  * unsuccessful attempts.
  */
-void __audit_inode_child(struct inode *parent,
+void __audit_inode_child(const struct inode *parent,
 			 const struct dentry *dentry,
 			 const unsigned char type)
 {
 	struct audit_context *context = current->audit_context;
-	struct inode *inode = d_backing_inode(dentry);
+	const struct inode *inode = dentry->d_inode;
 	const char *dname = dentry->d_name.name;
 	struct audit_names *n, *found_parent = NULL, *found_child = NULL;
 
@@ -1925,7 +1925,7 @@ void __audit_inode_child(struct inode *parent,
 	if (inode)
 		audit_copy_inode(found_child, dentry, inode);
 	else
-		found_child->ino = AUDIT_INO_UNSET;
+		found_child->ino = (unsigned long)-1;
 }
 EXPORT_SYMBOL_GPL(__audit_inode_child);
 
@@ -1980,7 +1980,6 @@ static void audit_log_set_loginuid(kuid_t koldloginuid, kuid_t kloginuid,
 {
 	struct audit_buffer *ab;
 	uid_t uid, oldloginuid, loginuid;
-	struct tty_struct *tty;
 
 	if (!audit_enabled)
 		return;
@@ -1988,17 +1987,14 @@ static void audit_log_set_loginuid(kuid_t koldloginuid, kuid_t kloginuid,
 	uid = from_kuid(&init_user_ns, task_uid(current));
 	oldloginuid = from_kuid(&init_user_ns, koldloginuid);
 	loginuid = from_kuid(&init_user_ns, kloginuid),
-	tty = audit_get_tty(current);
 
 	ab = audit_log_start(NULL, GFP_KERNEL, AUDIT_LOGIN);
 	if (!ab)
 		return;
 	audit_log_format(ab, "pid=%d uid=%u", task_pid_nr(current), uid);
 	audit_log_task_context(ab);
-	audit_log_format(ab, " old-auid=%u auid=%u tty=%s old-ses=%u ses=%u res=%d",
-			 oldloginuid, loginuid, tty ? tty_name(tty) : "(none)",
-			 oldsessionid, sessionid, !rc);
-	audit_put_tty(tty);
+	audit_log_format(ab, " old-auid=%u auid=%u old-ses=%u ses=%u res=%d",
+			 oldloginuid, loginuid, oldsessionid, sessionid, !rc);
 	audit_log_end(ab);
 }
 
@@ -2365,6 +2361,7 @@ static void audit_log_task(struct audit_buffer *ab)
 	kuid_t auid, uid;
 	kgid_t gid;
 	unsigned int sessionid;
+	struct mm_struct *mm = current->mm;
 	char comm[sizeof(current->comm)];
 
 	auid = audit_get_loginuid(current);
@@ -2379,7 +2376,13 @@ static void audit_log_task(struct audit_buffer *ab)
 	audit_log_task_context(ab);
 	audit_log_format(ab, " pid=%d comm=", task_pid_nr(current));
 	audit_log_untrustedstring(ab, get_task_comm(comm, current));
-	audit_log_d_path_exe(ab, current->mm);
+	if (mm) {
+		down_read(&mm->mmap_sem);
+		if (mm->exe_file)
+			audit_log_d_path(ab, " exe=", &mm->exe_file->f_path);
+		up_read(&mm->mmap_sem);
+	} else
+		audit_log_format(ab, " exe=(null)");
 }
 
 /**
@@ -2416,8 +2419,8 @@ void __audit_seccomp(unsigned long syscall, long signr, int code)
 		return;
 	audit_log_task(ab);
 	audit_log_format(ab, " sig=%ld arch=%x syscall=%ld compat=%d ip=0x%lx code=0x%x",
-			 signr, syscall_get_arch(), syscall,
-			 in_compat_syscall(), KSTK_EIP(current), code);
+			 signr, syscall_get_arch(), syscall, is_compat_task(),
+			 KSTK_EIP(current), code);
 	audit_log_end(ab);
 }
 

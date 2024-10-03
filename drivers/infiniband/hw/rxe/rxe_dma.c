@@ -1,6 +1,7 @@
 /*
- * Copyright (c) 2016 Mellanox Technologies Ltd. All rights reserved.
- * Copyright (c) 2015 System Fabric Works, Inc. All rights reserved.
+ * Copyright (c) 2009-2011 Mellanox Technologies Ltd. All rights reserved.
+ * Copyright (c) 2009-2011 System Fabric Works, Inc. All rights reserved.
+ * Copyright (c) 2006 QLogic, Corporation. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -34,26 +35,24 @@
 #include "rxe.h"
 #include "rxe_loc.h"
 
-#define DMA_BAD_ADDER ((u64)0)
-
 static int rxe_mapping_error(struct ib_device *dev, u64 dma_addr)
 {
-	return dma_addr == DMA_BAD_ADDER;
+	return dma_addr == 0;
 }
 
 static u64 rxe_dma_map_single(struct ib_device *dev,
 			      void *cpu_addr, size_t size,
 			      enum dma_data_direction direction)
 {
-	WARN_ON(!valid_dma_direction(direction));
-	return (uintptr_t)cpu_addr;
+	BUG_ON(!valid_dma_direction(direction));
+	return (u64) cpu_addr;
 }
 
 static void rxe_dma_unmap_single(struct ib_device *dev,
 				 u64 addr, size_t size,
 				 enum dma_data_direction direction)
 {
-	WARN_ON(!valid_dma_direction(direction));
+	BUG_ON(!valid_dma_direction(direction));
 }
 
 static u64 rxe_dma_map_page(struct ib_device *dev,
@@ -63,14 +62,14 @@ static u64 rxe_dma_map_page(struct ib_device *dev,
 {
 	u64 addr;
 
-	WARN_ON(!valid_dma_direction(direction));
+	BUG_ON(!valid_dma_direction(direction));
 
 	if (offset + size > PAGE_SIZE) {
 		addr = DMA_BAD_ADDER;
 		goto done;
 	}
 
-	addr = (uintptr_t)page_address(page);
+	addr = (u64) page_address(page);
 	if (addr)
 		addr += offset;
 
@@ -82,7 +81,7 @@ static void rxe_dma_unmap_page(struct ib_device *dev,
 			       u64 addr, size_t size,
 			       enum dma_data_direction direction)
 {
-	WARN_ON(!valid_dma_direction(direction));
+	BUG_ON(!valid_dma_direction(direction));
 }
 
 static int rxe_map_sg(struct ib_device *dev, struct scatterlist *sgl,
@@ -93,10 +92,11 @@ static int rxe_map_sg(struct ib_device *dev, struct scatterlist *sgl,
 	int i;
 	int ret = nents;
 
-	WARN_ON(!valid_dma_direction(direction));
+	BUG_ON(!valid_dma_direction(direction));
 
 	for_each_sg(sgl, sg, nents, i) {
-		addr = (uintptr_t)page_address(sg_page(sg));
+		addr = (u64) page_address(sg_page(sg));
+		/* TODO: handle highmem pages */
 		if (!addr) {
 			ret = 0;
 			break;
@@ -114,7 +114,7 @@ static void rxe_unmap_sg(struct ib_device *dev,
 			 struct scatterlist *sg, int nents,
 			 enum dma_data_direction direction)
 {
-	WARN_ON(!valid_dma_direction(direction));
+	BUG_ON(!valid_dma_direction(direction));
 }
 
 static void rxe_sync_single_for_cpu(struct ib_device *dev,
@@ -140,7 +140,7 @@ static void *rxe_dma_alloc_coherent(struct ib_device *dev, size_t size,
 		addr = page_address(p);
 
 	if (dma_handle)
-		*dma_handle = (uintptr_t)addr;
+		*dma_handle = (u64) addr;
 
 	return addr;
 }
@@ -148,7 +148,7 @@ static void *rxe_dma_alloc_coherent(struct ib_device *dev, size_t size,
 static void rxe_dma_free_coherent(struct ib_device *dev, size_t size,
 				  void *cpu_addr, u64 dma_handle)
 {
-	free_pages((unsigned long)cpu_addr, get_order(size));
+	free_pages((unsigned long) cpu_addr, get_order(size));
 }
 
 struct ib_dma_mapping_ops rxe_dma_mapping_ops = {

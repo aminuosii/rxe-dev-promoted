@@ -26,7 +26,7 @@
 static int hfsplus_ioctl_bless(struct file *file, int __user *user_flags)
 {
 	struct dentry *dentry = file->f_path.dentry;
-	struct inode *inode = d_inode(dentry);
+	struct inode *inode = dentry->d_inode;
 	struct hfsplus_sb_info *sbi = HFSPLUS_SB(inode->i_sb);
 	struct hfsplus_vh *vh = sbi->s_vhdr;
 	struct hfsplus_vh *bvh = sbi->s_backup_vhdr;
@@ -93,7 +93,7 @@ static int hfsplus_ioctl_setflags(struct file *file, int __user *user_flags)
 		goto out_drop_write;
 	}
 
-	inode_lock(inode);
+	mutex_lock(&inode->i_mutex);
 
 	if ((flags & (FS_IMMUTABLE_FL|FS_APPEND_FL)) ||
 	    inode->i_flags & (S_IMMUTABLE|S_APPEND)) {
@@ -126,7 +126,7 @@ static int hfsplus_ioctl_setflags(struct file *file, int __user *user_flags)
 	mark_inode_dirty(inode);
 
 out_unlock_inode:
-	inode_unlock(inode);
+	mutex_unlock(&inode->i_mutex);
 out_drop_write:
 	mnt_drop_write_file(file);
 out:

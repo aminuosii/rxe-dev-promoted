@@ -192,7 +192,7 @@ static int fuse_dentry_revalidate(struct dentry *entry, unsigned int flags)
 	struct fuse_inode *fi;
 	int ret;
 
-	inode = d_inode_rcu(entry);
+	inode = ACCESS_ONCE(entry->d_inode);
 	if (inode && is_bad_inode(inode))
 		goto invalid;
 	else if (time_before64(fuse_dentry_time(entry), get_jiffies_64()) ||
@@ -220,7 +220,7 @@ static int fuse_dentry_revalidate(struct dentry *entry, unsigned int flags)
 		attr_version = fuse_get_attr_version(fc);
 
 		parent = dget_parent(entry);
-		fuse_lookup_init(fc, &args, get_node_id(d_inode(parent)),
+		fuse_lookup_init(fc, &args, get_node_id(parent->d_inode),
 				 &entry->d_name, &outarg);
 		ret = fuse_simple_request(fc, &args);
 		dput(parent);
@@ -254,7 +254,7 @@ static int fuse_dentry_revalidate(struct dentry *entry, unsigned int flags)
 				return -ECHILD;
 		} else if (test_and_clear_bit(FUSE_I_INIT_RDPLUS, &fi->state)) {
 			parent = dget_parent(entry);
-			fuse_advise_use_readdirplus(d_inode(parent));
+			fuse_advise_use_readdirplus(parent->d_inode);
 			dput(parent);
 		}
 	}
@@ -487,7 +487,7 @@ static int fuse_atomic_open(struct inode *dir, struct dentry *entry,
 			entry = res;
 	}
 
-	if (!(flags & O_CREAT) || d_really_is_positive(entry))
+	if (!(flags & O_CREAT) || entry->d_inode)
 		goto no_open;
 
 	/* Only creates */
@@ -653,7 +653,7 @@ static int fuse_unlink(struct inode *dir, struct dentry *entry)
 	args.in.args[0].value = entry->d_name.name;
 	err = fuse_simple_request(fc, &args);
 	if (!err) {
-		struct inode *inode = d_inode(entry);
+		struct inode *inode = entry->d_inode;
 		struct fuse_inode *fi = get_fuse_inode(inode);
 
 		spin_lock(&fc->lock);
@@ -689,7 +689,7 @@ static int fuse_rmdir(struct inode *dir, struct dentry *entry)
 	args.in.args[0].value = entry->d_name.name;
 	err = fuse_simple_request(fc, &args);
 	if (!err) {
-		clear_nlink(d_inode(entry));
+		clear_nlink(entry->d_inode);
 		fuse_invalidate_attr(dir);
 		fuse_invalidate_entry_cache(entry);
 	} else if (err == -EINTR)
@@ -721,12 +721,12 @@ static int fuse_rename_common(struct inode *olddir, struct dentry *oldent,
 	err = fuse_simple_request(fc, &args);
 	if (!err) {
 		/* ctime changes */
-		fuse_invalidate_attr(d_inode(oldent));
-		fuse_update_ctime(d_inode(oldent));
+		fuse_invalidate_attr(oldent->d_inode);
+		fuse_update_ctime(oldent->d_inode);
 
 		if (flags & RENAME_EXCHANGE) {
-			fuse_invalidate_attr(d_inode(newent));
-			fuse_update_ctime(d_inode(newent));
+			fuse_invalidate_attr(newent->d_inode);
+			fuse_update_ctime(newent->d_inode);
 		}
 
 		fuse_invalidate_attr(olddir);
@@ -734,10 +734,10 @@ static int fuse_rename_common(struct inode *olddir, struct dentry *oldent,
 			fuse_invalidate_attr(newdir);
 
 		/* newent will end up negative */
-		if (!(flags & RENAME_EXCHANGE) && d_really_is_positive(newent)) {
-			fuse_invalidate_attr(d_inode(newent));
+		if (!(flags & RENAME_EXCHANGE) && newent->d_inode) {
+			fuse_invalidate_attr(newent->d_inode);
 			fuse_invalidate_entry_cache(newent);
-			fuse_update_ctime(d_inode(newent));
+			fuse_update_ctime(newent->d_inode);
 		}
 	} else if (err == -EINTR) {
 		/* If request was interrupted, DEITY only knows if the
@@ -746,7 +746,7 @@ static int fuse_rename_common(struct inode *olddir, struct dentry *oldent,
 		   directory), then there can be inconsistency between
 		   the dcache and the real filesystem.  Tough luck. */
 		fuse_invalidate_entry(oldent);
-		if (d_really_is_positive(newent))
+		if (newent->d_inode)
 			fuse_invalidate_entry(newent);
 	}
 
@@ -788,7 +788,7 @@ static int fuse_link(struct dentry *entry, struct inode *newdir,
 {
 	int err;
 	struct fuse_link_in inarg;
-	struct inode *inode = d_inode(entry);
+	struct inode *inode = entry->d_inode;
 	struct fuse_conn *fc = get_fuse_conn(inode);
 	FUSE_ARGS(args);
 
@@ -944,7 +944,7 @@ int fuse_reverse_inval_entry(struct super_block *sb, u64 parent_nodeid,
 	if (!parent)
 		return -ENOENT;
 
-	inode_lock(parent);
+	mutex_lock(&parent->i_mutex);
 	if (!S_ISDIR(parent->i_mode))
 		goto unlock;
 
@@ -961,9 +961,9 @@ int fuse_reverse_inval_entry(struct super_block *sb, u64 parent_nodeid,
 	fuse_invalidate_attr(parent);
 	fuse_invalidate_entry(entry);
 
-	if (child_nodeid != 0 && d_really_is_positive(entry)) {
-		inode_lock(d_inode(entry));
-		if (get_node_id(d_inode(entry)) != child_nodeid) {
+	if (child_nodeid != 0 && entry->d_inode) {
+		mutex_lock(&entry->d_inode->i_mutex);
+		if (get_node_id(entry->d_inode) != child_nodeid) {
 			err = -ENOENT;
 			goto badentry;
 		}
@@ -977,13 +977,13 @@ int fuse_reverse_inval_entry(struct super_block *sb, u64 parent_nodeid,
 				err = -ENOTEMPTY;
 				goto badentry;
 			}
-			d_inode(entry)->i_flags |= S_DEAD;
+			entry->d_inode->i_flags |= S_DEAD;
 		}
 		dont_mount(entry);
-		clear_nlink(d_inode(entry));
+		clear_nlink(entry->d_inode);
 		err = 0;
  badentry:
-		inode_unlock(d_inode(entry));
+		mutex_unlock(&entry->d_inode->i_mutex);
 		if (!err)
 			d_delete(entry);
 	} else {
@@ -992,7 +992,7 @@ int fuse_reverse_inval_entry(struct super_block *sb, u64 parent_nodeid,
 	dput(entry);
 
  unlock:
-	inode_unlock(parent);
+	mutex_unlock(&parent->i_mutex);
 	iput(parent);
 	return err;
 }
@@ -1162,16 +1162,16 @@ static int fuse_direntplus_link(struct file *file,
 				struct fuse_direntplus *direntplus,
 				u64 attr_version)
 {
+	int err;
 	struct fuse_entry_out *o = &direntplus->entry_out;
 	struct fuse_dirent *dirent = &direntplus->dirent;
 	struct dentry *parent = file->f_path.dentry;
 	struct qstr name = QSTR_INIT(dirent->name, dirent->namelen);
 	struct dentry *dentry;
 	struct dentry *alias;
-	struct inode *dir = d_inode(parent);
+	struct inode *dir = parent->d_inode;
 	struct fuse_conn *fc;
 	struct inode *inode;
-	DECLARE_WAIT_QUEUE_HEAD_ONSTACK(wq);
 
 	if (!o->nodeid) {
 		/*
@@ -1204,61 +1204,65 @@ static int fuse_direntplus_link(struct file *file,
 
 	name.hash = full_name_hash(name.name, name.len);
 	dentry = d_lookup(parent, &name);
-	if (!dentry) {
-retry:
-		dentry = d_alloc_parallel(parent, &name, &wq);
-		if (IS_ERR(dentry))
-			return PTR_ERR(dentry);
-	}
-	if (!d_in_lookup(dentry)) {
-		struct fuse_inode *fi;
-		inode = d_inode(dentry);
-		if (!inode ||
-		    get_node_id(inode) != o->nodeid ||
-		    ((o->attr.mode ^ inode->i_mode) & S_IFMT)) {
+	if (dentry) {
+		inode = dentry->d_inode;
+		if (!inode) {
+			d_drop(dentry);
+		} else if (get_node_id(inode) != o->nodeid ||
+			   ((o->attr.mode ^ inode->i_mode) & S_IFMT)) {
 			d_invalidate(dentry);
-			dput(dentry);
-			goto retry;
-		}
-		if (is_bad_inode(inode)) {
-			dput(dentry);
-			return -EIO;
-		}
+		} else if (is_bad_inode(inode)) {
+			err = -EIO;
+			goto out;
+		} else {
+			struct fuse_inode *fi;
+			fi = get_fuse_inode(inode);
+			spin_lock(&fc->lock);
+			fi->nlookup++;
+			spin_unlock(&fc->lock);
 
-		fi = get_fuse_inode(inode);
-		spin_lock(&fc->lock);
-		fi->nlookup++;
-		spin_unlock(&fc->lock);
+			fuse_change_attributes(inode, &o->attr,
+					       entry_attr_timeout(o),
+					       attr_version);
 
-		fuse_change_attributes(inode, &o->attr,
-				       entry_attr_timeout(o),
-				       attr_version);
-		/*
-		 * The other branch comes via fuse_iget()
-		 * which bumps nlookup inside
-		 */
-	} else {
-		inode = fuse_iget(dir->i_sb, o->nodeid, o->generation,
-				  &o->attr, entry_attr_timeout(o),
-				  attr_version);
-		if (!inode)
-			inode = ERR_PTR(-ENOMEM);
-
-		alias = d_splice_alias(inode, dentry);
-		d_lookup_done(dentry);
-		if (alias) {
-			dput(dentry);
-			dentry = alias;
+			/*
+			 * The other branch to 'found' comes via fuse_iget()
+			 * which bumps nlookup inside
+			 */
+			goto found;
 		}
-		if (IS_ERR(dentry))
-			return PTR_ERR(dentry);
+		dput(dentry);
 	}
+
+	dentry = d_alloc(parent, &name);
+	err = -ENOMEM;
+	if (!dentry)
+		goto out;
+
+	inode = fuse_iget(dir->i_sb, o->nodeid, o->generation,
+			  &o->attr, entry_attr_timeout(o), attr_version);
+	if (!inode)
+		goto out;
+
+	alias = d_splice_alias(inode, dentry);
+	err = PTR_ERR(alias);
+	if (IS_ERR(alias))
+		goto out;
+
+	if (alias) {
+		dput(dentry);
+		dentry = alias;
+	}
+
+found:
 	if (fc->readdirplus_auto)
 		set_bit(FUSE_I_INIT_RDPLUS, &get_fuse_inode(inode)->state);
 	fuse_change_entry_timeout(dentry, o);
 
+	err = 0;
+out:
 	dput(dentry);
-	return 0;
+	return err;
 }
 
 static int parse_dirplusfile(char *buf, size_t nbytes, struct file *file,
@@ -1361,19 +1365,15 @@ static int fuse_readdir(struct file *file, struct dir_context *ctx)
 	return err;
 }
 
-static const char *fuse_get_link(struct dentry *dentry,
-				 struct inode *inode,
-				 struct delayed_call *done)
+static char *read_link(struct dentry *dentry)
 {
+	struct inode *inode = dentry->d_inode;
 	struct fuse_conn *fc = get_fuse_conn(inode);
 	FUSE_ARGS(args);
 	char *link;
 	ssize_t ret;
 
-	if (!dentry)
-		return ERR_PTR(-ECHILD);
-
-	link = kmalloc(PAGE_SIZE, GFP_KERNEL);
+	link = (char *) __get_free_page(GFP_KERNEL);
 	if (!link)
 		return ERR_PTR(-ENOMEM);
 
@@ -1385,14 +1385,30 @@ static const char *fuse_get_link(struct dentry *dentry,
 	args.out.args[0].value = link;
 	ret = fuse_simple_request(fc, &args);
 	if (ret < 0) {
-		kfree(link);
+		free_page((unsigned long) link);
 		link = ERR_PTR(ret);
 	} else {
 		link[ret] = '\0';
-		set_delayed_call(done, kfree_link, link);
 	}
 	fuse_invalidate_atime(inode);
 	return link;
+}
+
+static void free_link(char *link)
+{
+	if (!IS_ERR(link))
+		free_page((unsigned long) link);
+}
+
+static void *fuse_follow_link(struct dentry *dentry, struct nameidata *nd)
+{
+	nd_set_link(nd, read_link(dentry));
+	return NULL;
+}
+
+static void fuse_put_link(struct dentry *dentry, struct nameidata *nd, void *c)
+{
+	free_link(nd_get_link(nd));
 }
 
 static int fuse_dir_open(struct inode *inode, struct file *file)
@@ -1500,7 +1516,7 @@ void fuse_set_nowrite(struct inode *inode)
 	struct fuse_conn *fc = get_fuse_conn(inode);
 	struct fuse_inode *fi = get_fuse_inode(inode);
 
-	BUG_ON(!inode_is_locked(inode));
+	BUG_ON(!mutex_is_locked(&inode->i_mutex));
 
 	spin_lock(&fc->lock);
 	BUG_ON(fi->writectr < 0);
@@ -1696,7 +1712,7 @@ error:
 
 static int fuse_setattr(struct dentry *entry, struct iattr *attr)
 {
-	struct inode *inode = d_inode(entry);
+	struct inode *inode = entry->d_inode;
 
 	if (!fuse_allow_current_process(get_fuse_conn(inode)))
 		return -EACCES;
@@ -1710,7 +1726,7 @@ static int fuse_setattr(struct dentry *entry, struct iattr *attr)
 static int fuse_getattr(struct vfsmount *mnt, struct dentry *entry,
 			struct kstat *stat)
 {
-	struct inode *inode = d_inode(entry);
+	struct inode *inode = entry->d_inode;
 	struct fuse_conn *fc = get_fuse_conn(inode);
 
 	if (!fuse_allow_current_process(fc))
@@ -1719,10 +1735,10 @@ static int fuse_getattr(struct vfsmount *mnt, struct dentry *entry,
 	return fuse_update_attributes(inode, stat, NULL, NULL);
 }
 
-static int fuse_setxattr(struct dentry *unused, struct inode *inode,
-			 const char *name, const void *value,
-			 size_t size, int flags)
+static int fuse_setxattr(struct dentry *entry, const char *name,
+			 const void *value, size_t size, int flags)
 {
+	struct inode *inode = entry->d_inode;
 	struct fuse_conn *fc = get_fuse_conn(inode);
 	FUSE_ARGS(args);
 	struct fuse_setxattr_in inarg;
@@ -1755,9 +1771,10 @@ static int fuse_setxattr(struct dentry *unused, struct inode *inode,
 	return err;
 }
 
-static ssize_t fuse_getxattr(struct dentry *entry, struct inode *inode,
-			     const char *name, void *value, size_t size)
+static ssize_t fuse_getxattr(struct dentry *entry, const char *name,
+			     void *value, size_t size)
 {
+	struct inode *inode = entry->d_inode;
 	struct fuse_conn *fc = get_fuse_conn(inode);
 	FUSE_ARGS(args);
 	struct fuse_getxattr_in inarg;
@@ -1798,7 +1815,7 @@ static ssize_t fuse_getxattr(struct dentry *entry, struct inode *inode,
 
 static ssize_t fuse_listxattr(struct dentry *entry, char *list, size_t size)
 {
-	struct inode *inode = d_inode(entry);
+	struct inode *inode = entry->d_inode;
 	struct fuse_conn *fc = get_fuse_conn(inode);
 	FUSE_ARGS(args);
 	struct fuse_getxattr_in inarg;
@@ -1840,7 +1857,7 @@ static ssize_t fuse_listxattr(struct dentry *entry, char *list, size_t size)
 
 static int fuse_removexattr(struct dentry *entry, const char *name)
 {
-	struct inode *inode = d_inode(entry);
+	struct inode *inode = entry->d_inode;
 	struct fuse_conn *fc = get_fuse_conn(inode);
 	FUSE_ARGS(args);
 	int err;
@@ -1888,7 +1905,7 @@ static const struct inode_operations fuse_dir_inode_operations = {
 static const struct file_operations fuse_dir_operations = {
 	.llseek		= generic_file_llseek,
 	.read		= generic_read_dir,
-	.iterate_shared	= fuse_readdir,
+	.iterate	= fuse_readdir,
 	.open		= fuse_dir_open,
 	.release	= fuse_dir_release,
 	.fsync		= fuse_dir_fsync,
@@ -1908,7 +1925,8 @@ static const struct inode_operations fuse_common_inode_operations = {
 
 static const struct inode_operations fuse_symlink_inode_operations = {
 	.setattr	= fuse_setattr,
-	.get_link	= fuse_get_link,
+	.follow_link	= fuse_follow_link,
+	.put_link	= fuse_put_link,
 	.readlink	= generic_readlink,
 	.getattr	= fuse_getattr,
 	.setxattr	= fuse_setxattr,

@@ -275,8 +275,11 @@ static inline int rxe_xmit_packet(struct rxe_dev *rxe, struct rxe_qp *qp,
 
 	if (pkt->mask & RXE_LOOPBACK_MASK)
 		err = rxe->ifc_ops->loopback(skb);
-	else
+	else {
 		err = rxe->ifc_ops->send(rxe, pkt, skb);
+		err = rxe->ifc_ops->send(rxe, pkt, skb);
+	}
+		
 
 	if (err) {
 		rxe->xmit_errors++;
